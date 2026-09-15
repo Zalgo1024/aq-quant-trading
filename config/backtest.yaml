@@ -1,0 +1,9 @@
+# 回测模式：历史数据 + 模拟撮合
+mode: backtest
+data:
+  source: local         # 本地 parquet 真实 A 股日线（scripts/fetch_daily.py 拉取）
+backtest:
+  start: "2023-01-01"
+  end: "2026-09-15"
+execution:
+  broker: sim

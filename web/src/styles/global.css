@@ -1,0 +1,62 @@
+:root {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  background: #141414;
+  color: #e8e8e8;
+}
+
+/* A 股配色：红涨绿跌 */
+.up {
+  color: #f5222d;
+}
+
+.down {
+  color: #52c41a;
+}
+
+.flat {
+  color: #8c8c8c;
+}
+
+.risk-banner {
+  background: rgba(250, 173, 20, 0.12);
+  border: 1px solid rgba(250, 173, 20, 0.35);
+  color: #faad14;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.mono {
+  font-family: 'SF Mono', Consolas, 'Courier New', monospace;
+}
+
+/* 滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: #3a3a3a;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}

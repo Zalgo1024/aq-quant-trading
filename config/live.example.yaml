@@ -1,0 +1,22 @@
+# 实盘配置示例（**请勿直接使用，接入前必须核对**）
+#
+# 切换到实盘只需：mode: live + broker: <你的券商通道>
+# 策略/组合/风控代码零改动。
+#
+# ⚠️ 风险提示与合规要求：
+#   1. 程序化交易须遵守当地法律法规，并按监管要求完成报备；
+#   2. 请先在模拟盘（paper）充分验证，再以极小资金试跑；
+#   3. 本项目不构成任何投资建议，作者不对任何交易结果负责。
+mode: live
+data:
+  source: akshare
+execution:
+  broker: qmt              # qmt | ptrade | jq
+  account_id: "REPLACE_ME"
+  persist_path: runtime/live_account.json
+  poll_interval: 1.0
+
+# 各券商通道的凭据请使用环境变量注入，切勿写入版本库：
+#   AQ_EXECUTION__QMT_PATH=...
+#   AQ_EXECUTION__QMT_ACCOUNT=...
+#   AQ_EXECUTION__QMT_SESSION=...

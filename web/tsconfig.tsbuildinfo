@@ -1,0 +1,1 @@
+{"root":["./src/main.tsx","./src/components/applayout.tsx","./src/pages/admin.tsx","./src/pages/anomaly.tsx","./src/pages/backtest.tsx","./src/pages/marketoverview.tsx","./src/pages/signals.tsx","./src/pages/stockdetail.tsx","./src/pages/stocklist.tsx","./src/services/api.ts","./src/types/index.ts","./src/utils/format.ts"],"version":"5.9.3"}

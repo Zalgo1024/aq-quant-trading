@@ -1,0 +1,53 @@
+# 基础配置 —— 所有模式共用
+mode: paper            # backtest | paper | live
+
+data:
+  source: local        # local(本地 parquet) | akshare | tushare | mock（数据为空时自动降级 mock）
+  adjust: post         # 后复权算收益，避免分红送转失真
+  start: "2018-01-01"
+  end: "2026-09-15"
+  cache_dir: data_cache
+
+universe:
+  index: hs300
+  exclude: [ST, DELISTED]
+  min_list_days: 60    # 次新股过滤：上市不足 60 日不参与
+
+backtest:
+  start: "2018-01-01"
+  end: "2026-09-15"
+  freq: 1d
+  initial_cash: 1000000.0
+  benchmark: "000300"  # 沪深300
+  cost:
+    commission: 0.00025      # 佣金万 2.5
+    min_commission: 5.0      # 最低 5 元
+    stamp_tax: 0.0005        # 印花税千 0.5（仅卖出）
+    transfer_fee: 0.00001
+    slippage: 0.001          # 滑点千 1
+
+risk:
+  single_stock_max: 0.10
+  industry_max: 0.30
+  total_position_max: 0.95
+  stop_loss: 0.08
+  max_drawdown: 0.20
+  liquidity_min_turnover: 100000000.0   # 日均成交额门槛 1 亿元
+
+model:
+  cross_section: lightgbm
+  time_series: lstm
+  sentiment: llm_api
+  top_k: 20
+  score_threshold: 0.55
+
+frontend:
+  theme: dark
+  up_color: red       # A 股习惯：红涨绿跌
+  currency: CNY
+
+execution:
+  broker: sim
+  account_id: sim
+  persist_path: runtime/sim_account.json
+  poll_interval: 3.0

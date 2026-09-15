@@ -1,0 +1,34 @@
+# 缓存与运行时文件
+data_cache/
+runtime/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# 前端
+web/node_modules/
+web/dist/
+web/.vite/
+
+# 模型产物
+models_registry/
+*.pkl
+*.joblib
+*.parquet
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
+
+# 凭据（重要！）
+.env
+*.env
+config/live.yaml

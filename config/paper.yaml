@@ -1,0 +1,10 @@
+# 模拟盘模式：实时/回放行情 + 虚拟账户（SimGateway）
+# source=local：回放本地 parquet（数据到最近交易日），稳定可复现
+# source=akshare：联网取最新行情（慢，适合单票/小池子或每日增量）
+mode: paper
+data:
+  source: local
+execution:
+  broker: sim
+  account_id: sim
+  persist_path: runtime/sim_account.json
