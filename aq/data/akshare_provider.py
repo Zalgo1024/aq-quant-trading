@@ -291,7 +291,15 @@ def _is_st_name(name: str) -> bool:
 
 
 def _prefixed(code: str) -> str:
-    """600000 -> sh600000；000001 -> sz000001；北交所 -> bj。"""
+    """600000 -> sh600000；000001 -> sz000001；北交所 -> bj。
+
+    注意 **920 代码段**：北交所 2024 年起启用 920xxx 新代码（原 8xxxxx / 4xxxxx），
+    而 9 开头的沪市代码只有 B 股 900xxx。若按老规则把 920 归到 sh，
+    新浪源会查不到，343 只北交所股票会全部拉取失败。
+    """
+    code = str(code).strip()
+    if code.startswith("920"):
+        return "bj" + code
     if code.startswith(("60", "68", "51", "11", "9")):
         return "sh" + code
     if code.startswith(("8", "4")):

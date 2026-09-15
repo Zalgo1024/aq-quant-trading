@@ -37,6 +37,9 @@ from aq.data.store import BarStore  # noqa: E402
 
 _print_lock = threading.Lock()
 
+# 主源查不到时的降级源（新浪不覆盖 CDR 存托凭证等，腾讯可以）
+FALLBACK_SOURCE = {"sina": "tx", "tx": "sina", "eastmoney": "sina"}
+
 
 def _log(msg: str) -> None:
     with _print_lock:
@@ -54,6 +57,9 @@ def main() -> int:
     ap.add_argument("--source", default="sina", choices=["sina", "tx", "eastmoney"], help="数据源")
     ap.add_argument("--offset", type=int, default=0, help="跳过前 N 只（断点用）")
     ap.add_argument("--workers", type=int, default=4, help="并发线程数（1=串行）")
+    ap.add_argument("--no-fallback", dest="fallback", action="store_false",
+                    help="关闭源降级（默认新浪查不到会换腾讯再试）")
+    ap.set_defaults(fallback=True)
     ap.add_argument("--refresh-list", action="store_true",
                     help="强制重新拉取股票列表（默认复用本地 stock_list.parquet）")
     args = ap.parse_args()
@@ -119,28 +125,39 @@ def main() -> int:
     # 每个线程一个 provider 实例（akshare 内部有 session 状态，不共享更安全）
     local = threading.local()
 
-    def get_prov():  # type: ignore[no-untyped-def]
-        p = getattr(local, "prov", None)
+    def get_prov(source: str = None):  # type: ignore[no-untyped-def]
+        source = source or args.source
+        key = f"prov_{source}"
+        p = getattr(local, key, None)
         if p is None:
-            p = AkshareProvider(cfg, source=args.source)
+            p = AkshareProvider(cfg, source=source)
             p._is_st_map = dict(provider._is_st_map)  # 复用已解析的 ST 标记
-            local.prov = p
+            setattr(local, key, p)
         return p
 
     def work(sym: str) -> tuple[str, str, str]:
         """返回 (symbol, 状态, 备注)；状态 ∈ ok / nodata / fail"""
+        st, note = _try_fetch(sym, args.source)
+        if st == "fail" and args.fallback:
+            #  자동降级：新浪查不到的（如 CDR 存托凭证 689009）换腾讯再试
+            st2, note2 = _try_fetch(sym, FALLBACK_SOURCE[args.source])
+            if st2 == "ok":
+                return sym, "ok", note2 + " (fallback)"
+        return sym, st, note
+
+    def _try_fetch(sym: str, source: str) -> tuple[str, str]:
         for attempt in range(1, 4):
             try:
-                bars = get_prov().get_daily(sym, start, end)
+                bars = get_prov(source).get_daily(sym, start, end)
                 if bars:
                     store.save(sym, bars)
-                    return sym, "ok", str(len(bars))
-                return sym, "nodata", ""
+                    return "ok", str(len(bars))
+                return "nodata", ""
             except Exception as exc:  # noqa: BLE001
                 if attempt == 3:
-                    return sym, "fail", str(exc)[:80]
+                    return "fail", str(exc)[:80]
                 time.sleep(1.5 * attempt)
-        return sym, "fail", "unknown"
+        return "fail", "unknown"
 
     if args.workers <= 1:
         results = [work(s) for s in todo]
