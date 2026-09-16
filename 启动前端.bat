@@ -1,30 +1,62 @@
 @echo off
-chcp 65001 >nul
+chcp 936 >nul
+setlocal enabledelayedexpansion
+cd /d "%~dp0\web"
+
 echo ============================================================
-echo   å¯åŠ¨å‰ç«¯å¼€å‘æœåŠ¡å™¨ (http://127.0.0.1:5173)
-echo   è¯·ç¡®ä¿å·²å…ˆå¯åŠ¨ API æœåŠ¡
+echo   Æô¶¯Ç°¶Ë¿ª·¢·þÎñÆ÷
+echo   µØÖ·: http://127.0.0.1:5173
+echo   ×¢Òâ: ÇëÏÈÔËÐÐ¡¸Æô¶¯API.bat¡¹, ·ñÔòÒ³ÃæÈ¡²»µ½Êý¾Ý
+echo   Í£Ö¹: °´ Ctrl+C
 echo ============================================================
 echo.
 
-cd /d "%~dp0\web"
-
+REM ---- ¼ì²é Node.js ----
 where node >nul 2>nul
 if errorlevel 1 (
-    echo [é”™è¯¯] æœªæ£€æµ‹åˆ° Node.jsï¼Œè¯·å…ˆå®‰è£… Node.js 18+
+    echo [´íÎó] Î´¼ì²âµ½ Node.js, ÇëÏÈ°²×° Node.js 18 ÒÔÉÏ°æ±¾¡£
     pause
     exit /b 1
 )
+for /f "tokens=*" %%v in ('node -v') do set "NODEVER=%%v"
+echo [¾ÍÐ÷] Node.js !NODEVER!
 
-if not exist "node_modules" (
-    echo [1/2] é¦–æ¬¡è¿è¡Œï¼Œå®‰è£…å‰ç«¯ä¾èµ– ...
+REM ---- ¼ì²éÒÀÀµ ----
+REM node_modules Ä¿Â¼´æÔÚ²»´ú±í×°È«ÁË£¨ÖÐ¶ÏµÄ npm install »áÁôÏÂ°ë³ÉÆ·£©,
+REM ËùÒÔÖ±½Ó¼ì²é vite Èë¿ÚÎÄ¼þ¡£
+echo.
+if not exist "node_modules\vite" (
+    echo [1/2] °²×°Ç°¶ËÒÀÀµ£¨Ê×´ÎÔËÐÐ, ÐèÒª¼¸·ÖÖÓ£©...
     call npm install
     if errorlevel 1 (
-        echo [é”™è¯¯] npm install å¤±è´¥
+        echo.
+        echo [´íÎó] npm install Ê§°Ü¡£
+        echo        ¹úÄÚÍøÂç¿ÉÏÈÖ´ÐÐ:
+        echo          npm config set registry https://registry.npmmirror.com
+        echo        È»ºóÖØÐÂÔËÐÐ±¾½Å±¾¡£
         pause
         exit /b 1
     )
+) else (
+    echo [1/2] ÒÀÀµÒÑ¾ÍÐ÷, Ìø¹ý°²×°
 )
 
-echo [2/2] å¯åŠ¨å¼€å‘æœåŠ¡å™¨ ...
+REM ---- ºó¶ËÊÇ·ñÔÚÏß£¨Ö»ÊÇÌáÊ¾, ²»×èÈû£©----
+echo.
+netstat -ano ^| findstr ":8000" ^| findstr "LISTENING" >nul 2>nul
+if not errorlevel 1 (
+    echo [2/2] ºó¶Ë API ÒÑÔÚÔËÐÐ, Æô¶¯ Vite ...
+) else (
+    echo [2/2] ¾¯¸æ: ¶Ë¿Ú 8000 Ã»ÓÐÏìÓ¦, ºó¶Ë API ¿ÉÄÜÃ»Æô¶¯¡£
+    echo        Ò³ÃæÄÜ´ò¿ª, µ«Êý¾Ý½Ó¿Ú»áÈ«²¿Ê§°Ü¡£
+    echo        ÇëÏÈÔËÐÐ¡¸Æô¶¯API.bat¡¹¡£
+)
+echo       Ò³ÃæµØÖ· http://127.0.0.1:5173
+echo.
+
 call npm run dev
+
+echo.
+echo Ç°¶ËÒÑÍ£Ö¹¡£
 pause
+endlocal

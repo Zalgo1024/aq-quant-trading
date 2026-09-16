@@ -1,19 +1,53 @@
 @echo off
-chcp 65001 >nul
+chcp 936 >nul
+setlocal enabledelayedexpansion
+cd /d "%~dp0"
+
 echo ============================================================
-echo   å¯åŠ¨ API æœåŠ¡ (http://127.0.0.1:8000)
-echo   API æ–‡æ¡£: http://127.0.0.1:8000/docs
-echo   æŒ‰ Ctrl+C åœæ­¢
+echo   Æô¶¯ºó¶Ë API ·þÎñ
+echo   µØÖ·: http://127.0.0.1:8000
+echo   ÎÄµµ: http://127.0.0.1:8000/docs
+echo   Í£Ö¹: °´ Ctrl+C
 echo ============================================================
 echo.
 
-cd /d "%~dp0"
+REM ---- Ñ¡½âÊÍÆ÷: ÓÅÏÈ .venv, »ØÍËÏµÍ³ python ----
+REM ºÍ³õÊ¼»¯½Å±¾Ò»Ñù: Ä¿Â¼´æÔÚ²»µÈÓÚ¿ÉÓÃ, ÒªÌ½²â fastapi/uvicorn ÕæµÄÄÜ import¡£
+set "PY="
+if exist ".venv\Scripts\python.exe" (
+    ".venv\Scripts\python.exe" -c "import fastapi,uvicorn" >nul 2>nul
+    if not errorlevel 1 set "PY=.venv\Scripts\python.exe"
+)
+if not defined PY (
+    python -c "import fastapi,uvicorn" >nul 2>nul
+    if not errorlevel 1 set "PY=python"
+)
+if not defined PY (
+    echo [´íÎó] Ã»ÓÐ¿ÉÓÃµÄ Python »·¾³£¨ÐèÒª fastapi + uvicorn£©¡£
+    echo        ÇëÏÈÔËÐÐ¡¸³õÊ¼»¯»·¾³.bat¡¹¡£
+    pause
+    exit /b 1
+)
+echo [¾ÍÐ÷] Ê¹ÓÃ !PY!
 
-if not exist ".venv\Scripts\python.exe" (
-    echo [é”™è¯¯] æœªæ‰¾åˆ°è™šæ‹ŸçŽ¯å¢ƒï¼Œè¯·å…ˆè¿è¡Œã€Œåˆå§‹åŒ–çŽ¯å¢ƒ.batã€
+REM ---- ¶Ë¿ÚÕ¼ÓÃ¼ì²é ----
+REM Ã»ÓÐÕâÒ»²½µÄ»°, ÖØ¸´Ë«»÷»á±¨Ò»¶Ñ "address already in use",
+REM ¿´ÆðÀ´Ïñ·þÎñ±ÀÁË, Êµ¼ÊÖ»ÊÇÒÑ¾­ÓÐÒ»¸öÔÚÅÜ¡£
+netstat -ano ^| findstr ":8000" ^| findstr "LISTENING" >nul 2>nul
+if not errorlevel 1 (
+    echo.
+    echo [ÌáÊ¾] ¶Ë¿Ú 8000 ÒÑ±»Õ¼ÓÃ, API ¿ÉÄÜÒÑ¾­ÔÚÔËÐÐ:
+    echo        http://127.0.0.1:8000/docs
     pause
     exit /b 1
 )
 
-call .venv\Scripts\python.exe -m uvicorn aq.api.app:app --host 127.0.0.1 --port 8000 --reload
+echo.
+echo ÕýÔÚÆô¶¯ ... ä¯ÀÀÆ÷´ò¿ª http://127.0.0.1:8000/docs
+echo.
+"!PY!" -m uvicorn aq.api.app:app --host 127.0.0.1 --port 8000
+
+echo.
+echo API ÒÑÍ£Ö¹¡£
 pause
+endlocal

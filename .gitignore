@@ -16,6 +16,9 @@ venv/
 web/node_modules/
 web/dist/
 web/.vite/
+# Vite 每次启动会在配置旁生成带时间戳的临时文件（vite.config.ts.timestamp-*.mjs），
+# 属构建副产物，不是源码 —— 否则每次跑一次前端就多一个待提交文件。
+web/*.timestamp-*.mjs
 
 # 模型产物
 models_registry/

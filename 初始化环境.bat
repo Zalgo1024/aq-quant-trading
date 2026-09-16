@@ -1,50 +1,113 @@
 @echo off
-chcp 65001 >nul
+chcp 936 >nul
+setlocal enabledelayedexpansion
+cd /d "%~dp0"
+
 echo ============================================================
-echo   A è‚¡ AI é‡åŒ–äº¤æ˜“ç³»ç»Ÿ - ç¯å¢ƒåˆå§‹åŒ–
+echo   A ¹É AI Á¿»¯½»Ò×ÏµÍ³ - »·¾³³õÊ¼»¯
 echo ============================================================
 echo.
 
-cd /d "%~dp0"
-
-if not exist ".venv" (
-    echo [1/3] åˆ›å»ºè™šæ‹Ÿç¯å¢ƒ .venv ...
-    python -m venv .venv
-    if errorlevel 1 (
-        echo [é”™è¯¯] åˆ›å»ºè™šæ‹Ÿç¯å¢ƒå¤±è´¥ï¼Œè¯·ç¡®è®¤å·²å®‰è£… Python 3.10+
-        pause
-        exit /b 1
-    )
-) else (
-    echo [1/3] è™šæ‹Ÿç¯å¢ƒå·²å­˜åœ¨ï¼Œè·³è¿‡
-)
-
-echo [2/3] å®‰è£…åç«¯ä¾èµ– ...
-call .venv\Scripts\python.exe -m pip install --upgrade pip -q -i https://pypi.tuna.tsinghua.edu.cn/simple
-call .venv\Scripts\python.exe -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+REM ---------------------------------------------------------- 1) ÕÒ Python
+echo [1/4] ¼ì²é Python ...
+set "SYS_PY=python"
+where python >nul 2>nul
 if errorlevel 1 (
-    echo [è­¦å‘Š] æ¸…åæºå®‰è£…å¤±è´¥ï¼Œæ”¹ç”¨é»˜è®¤æºé‡è¯• ...
-    call .venv\Scripts\python.exe -m pip install -r requirements.txt
+    set "SYS_PY=py -3"
+    where py >nul 2>nul
     if errorlevel 1 (
-        echo [é”™è¯¯] ä¾èµ–å®‰è£…å¤±è´¥
+        echo   [´íÎó] Î´¼ì²âµ½ Python¡£
+        echo        ÇëÏÈ°²×° Python 3.10 ÒÔÉÏ°æ±¾, ²¢¹´Ñ¡Ìí¼Óµ½ PATH¡£
         pause
         exit /b 1
     )
 )
-
-echo [3/3] è¿è¡Œå†’çƒŸæµ‹è¯• ...
-call .venv\Scripts\python.exe -m aq.smoke_test
+REM ×¢Òâ: ÕâÀï²»ÄÜĞ´ "sys.version_info >= (3,10)" ÕâÀàÅĞ¶Ï¡£
+REM cmd ÔÚË«ÒıºÅÄÚÈÔ°Ñ > µ±ÖØ¶¨Ïò, ÃüÁî±»½Ø¶Ïºó errorlevel ·Ç 0,
+REM ÓÚÊÇÃ÷Ã÷°æ±¾¹»Ò²»áÎó±¨"°æ±¾¹ıµÍ"¡£¸Ä³Éµ¼Èë¼ì²â + Ö±½Ó´òÓ¡°æ±¾¡£
+%SYS_PY% -c "import sys, venv" >nul 2>nul
 if errorlevel 1 (
-    echo.
-    echo [è­¦å‘Š] å†’çƒŸæµ‹è¯•å­˜åœ¨å¤±è´¥é¡¹ï¼Œè¯·æ£€æŸ¥ä¸Šé¢çš„è¾“å‡º
+    echo   [´íÎó] µ±Ç° Python ÎŞ·¨´´½¨ĞéÄâ»·¾³, ĞèÒª 3.10 ÒÔÉÏ°æ±¾¡£
     pause
     exit /b 1
 )
+echo        Ê¹ÓÃ %SYS_PY%
+%SYS_PY% --version
+echo        ÏîÄ¿ÒªÇó 3.10 ÒÔÉÏ; Èô°æ±¾²»·ûÇëÉı¼¶ºóÖØĞÂÔËĞĞ¡£
+
+REM ---------------------------------------------------------- 2) ½¨ venv
+echo.
+echo [2/4] ×¼±¸ĞéÄâ»·¾³ .venv ...
+REM ¹Ø¼ü: Ä¿Â¼´æÔÚ²»µÈÓÚ¿ÉÓÃ¡£ÕâÀïÔø¾­²È¹ı: .venv ÊÇ¸öÖ»ÓĞ pip/setuptools µÄ
+REM "¿Õ¿Ç", pandas/fastapi/uvicorn Ò»¸ö¶¼Ã»ÓĞ, ÓÚÊÇÈı¸öÆô¶¯½Å±¾È«²¿¹ÒÔÚ
+REM import ÉÏ, ¶ø±¨´í¿´ÆğÀ´È´Ïñ"´úÂë»µÁË"¡£ËùÒÔ±ØĞëÌ½²âÒÀÀµ, ²»ÄÜÖ»¿´Ä¿Â¼¡£
+set "VENV_OK=0"
+if exist ".venv\Scripts\python.exe" (
+    ".venv\Scripts\python.exe" -c "import pandas, fastapi, uvicorn" >nul 2>nul
+    if not errorlevel 1 set "VENV_OK=1"
+)
+if "!VENV_OK!"=="1" (
+    echo        .venv ÒÑ¾ÍĞ÷, Ìø¹ı´´½¨
+) else (
+    if exist ".venv" (
+        echo        ÏÖÓĞ .venv È±ÉÙºËĞÄÒÀÀµ, ÕıÔÚÖØ½¨ ...
+        rmdir /s /q ".venv"
+    ) else (
+        echo        Ê×´ÎÔËĞĞ, ÕıÔÚ´´½¨ ...
+    )
+    REM --system-site-packages: ¼Ì³ĞÏµÍ³ÀïÒÑ×°ºÃµÄ numpy/pandas/fastapi/uvicorn,
+    REM ³õÊ¼»¯²»±ØÁªÍøÖØÏÂÒ»±é, ÀëÏß»·¾³Ò²ÄÜÅÜÍ¨¡£
+    %SYS_PY% -m venv .venv --system-site-packages
+    if errorlevel 1 (
+        echo   [´íÎó] ´´½¨ĞéÄâ»·¾³Ê§°Ü¡£
+        pause
+        exit /b 1
+    )
+    echo        ÒÑ´´½¨£¨¼Ì³ĞÏµÍ³ÒÑ×°ÒÀÀµ, ÀëÏßÒ²ÄÜÓÃ£©
+)
+
+REM ---------------------------------------------------------- 3) ×°ÒÀÀµ
+echo.
+echo [3/4] ¼ì²éºó¶ËÒÀÀµ ...
+".venv\Scripts\python.exe" -c "import pandas, fastapi, uvicorn, pyarrow, pydantic, yaml" >nul 2>nul
+if not errorlevel 1 (
+    echo        ºËĞÄÒÀÀµÒÑ¾ß±¸, Ìø¹ı°²×°
+) else (
+    echo        ÕıÔÚ°²×° requirements.txt ...
+    ".venv\Scripts\python.exe" -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+    if errorlevel 1 (
+        echo        Çå»ªÔ´Ê§°Ü, ¸ÄÓÃÄ¬ÈÏÔ´ÖØÊÔ ...
+        ".venv\Scripts\python.exe" -m pip install -r requirements.txt
+        if errorlevel 1 (
+            echo   [´íÎó] ÒÀÀµ°²×°Ê§°Ü, Çë¼ì²éÍøÂçºóÖØĞÂÔËĞĞ±¾½Å±¾¡£
+            pause
+            exit /b 1
+        )
+    )
+)
+
+REM ---------------------------------------------------------- 4) Ã°ÑÌ²âÊÔ
+echo.
+echo [4/4] Ã°ÑÌ²âÊÔ
+set "RUNSMOKE=Y"
+set /p "RUNSMOKE=        ÊÇ·ñÔËĞĞ£¨Ğ£ÑéÈ«²¿×ÓÏµÍ³, ½ÏÂı£©? [Y/n] "
+if /i "!RUNSMOKE!"=="n" (
+    echo        ÒÑÌø¹ı
+) else (
+    ".venv\Scripts\python.exe" -m aq.smoke_test
+    if errorlevel 1 (
+        echo   [¾¯¸æ] Ã°ÑÌ²âÊÔ´æÔÚÊ§°ÜÏî, Çë¿´ÉÏÃæµÄÊä³ö¡£
+    ) else (
+        echo        Ã°ÑÌ²âÊÔÈ«²¿Í¨¹ı
+    )
+)
 
 echo.
 echo ============================================================
-echo   åˆå§‹åŒ–å®Œæˆï¼
-echo   å¯åŠ¨ API:  å¯åŠ¨API.bat
-echo   å¯åŠ¨å‰ç«¯:  å¯åŠ¨å‰ç«¯.bat
+echo   ³õÊ¼»¯Íê³É
+echo     Æô¶¯ºó¶Ë:  Æô¶¯API.bat     http://127.0.0.1:8000/docs
+echo     Æô¶¯Ç°¶Ë:  Æô¶¯Ç°¶Ë.bat     http://127.0.0.1:5173
+echo   Ë³Ğò: ÏÈºó¶Ë, ÔÙÇ°¶Ë¡£
 echo ============================================================
 pause
+endlocal
