@@ -93,7 +93,28 @@ class RiskConfig(BaseModel):
     total_position_max: float = 0.95
     stop_loss: float = 0.08
     max_drawdown: float = 0.20
-    liquidity_min_turnover: float = 1e8
+    # 单日成交额门槛（元）。**默认关闭（0）**，理由见下。
+    #
+    # 这里曾经是 1e8（1 亿），而股票池按"20 日日均 ≥ 2e7"选股 ——
+    # 门槛差 5 倍、且一个是 20 日均值一个是单日值。后果：20 只目标里
+    # 平均只有 5.4 只买得进，平均仓位被死死压在 26.7%，
+    # 2059 笔买单以"流动性不足"被拒（占全部拒单的 99.8%），
+    # 而日志里一句提示都没有。
+    #
+    # 为什么默认不是"对齐到 2e7"：那样仍然是用**单日**值去重复
+    # **20 日均值**的过滤，会在个股成交额临时回落的日子上造成
+    # "部分成交"—— 组合被随机削掉一部分，而不是按信号削。
+    # 正确分工是：
+    #   · 能不能投  → 交给 universe.min_turnover（20 日均值，选股时过滤）
+    #   · 能吃多少  → 交给 liquidity_order_ratio（与组合规模挂钩）
+    # 两道门槛各司其职，不再用两个不同口径互相打架。
+    # 需要额外保守时可自行设成正数（注意必须与 universe.min_turnover 同量级）。
+    liquidity_min_turnover: float = 0.0
+    # 相对流动性门槛：单笔订单金额不得超过当日成交额的 1/ratio。
+    # 绝对门槛无法随组合规模缩放（1 亿对 100 万的组合过严、对 10 亿过松），
+    # 这条相对约束才是真正与"冲击成本"挂钩的那一道。
+    # 0 或负 = 不启用。
+    liquidity_order_ratio: float = 10.0
 
 
 class ModelConfig(BaseModel):

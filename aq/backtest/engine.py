@@ -13,10 +13,10 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from math import ceil
 from uuid import uuid4
 
 import pandas as pd
-
 from aq.backtest.metrics import compute_metrics
 from aq.core.models import (
     Account,
@@ -59,6 +59,7 @@ class BacktestEngine:
             top_k=cfg.model.top_k,
             min_score=cfg.model.score_threshold,
         )
+        self._warn_config_conflicts(cfg)
 
         self.symbols: list[str] = []
         self._bars: dict[str, dict[str, Bar]] = {}   # symbol -> date -> Bar
@@ -71,6 +72,53 @@ class BacktestEngine:
         # 用它替代"每天对每只股票重算一遍因子"——后者在因子数从 10 增到 27 后
         # 复杂度爆炸（回测从秒级掉到十几分钟）。
         self._panel: dict[str, pd.DataFrame] = {}
+
+    # ------------------------------------------------------- 配置一致性校验
+    def _warn_config_conflicts(self, cfg) -> None:
+        """在开跑**之前**把互相打架的配置喊出来。
+
+        为什么要这一层
+        --------------
+        本项目已经踩到 6 次"配置从未生效 / 配置互相冲突"类问题，它们的共同点是
+        **不报错、不崩溃、只是结果悄悄不对**。单独看每个配置都合理，
+        组合起来却会让策略什么都不做。与其事后从"仓位为什么是 0%"
+        倒推，不如开跑前就把冲突列出来。
+
+        已捕获的三类冲突：
+          1. 单只权重 > 单票上限 → 所有买单必被拒，仓位恒为 0
+          2. 股票池流动性门槛 < 风控流动性门槛 → 选得进却买不进
+          3. 目标总仓位 > 总仓位上限 → 永远达不到目标
+        """
+        warn: list[str] = []
+
+        k = max(int(getattr(cfg.model, "top_k", 0) or 0), 1)
+        per_pos = 1.0 / k
+        ssm = float(getattr(cfg.risk, "single_stock_max", 1.0) or 1.0)
+        if per_pos > ssm + 1e-9:
+            warn.append(
+                f"单只目标权重 {per_pos:.1%}（1/top_k={k}）> 单票上限 "
+                f"{ssm:.1%} → **所有买单都会被拒**，仓位恒为 0。"
+                f"把 top_k 提到 ≥ {ceil(1.0 / ssm)} 或放宽 single_stock_max")
+
+        uni_to = float(getattr(cfg.universe, "min_turnover", 0.0) or 0.0)
+        risk_to = float(getattr(cfg.risk, "liquidity_min_turnover", 0.0) or 0.0)
+        if 0 < uni_to < risk_to:
+            warn.append(
+                f"股票池按'20 日日均成交额 ≥ {uni_to/1e8:.2f} 亿'选股，风控却按"
+                f"'单日 ≥ {risk_to/1e8:.2f} 亿'卡单（差 {risk_to/uni_to:.1f} 倍）"
+                f" → 选得进却买不进，仓位会被系统性压低")
+
+        tpm = float(getattr(cfg.risk, "total_position_max", 1.0) or 1.0)
+        if per_pos * k > tpm + 1e-9:
+            # 这一条通常是**有意为之**（留现金缓冲），所以只提示不告警
+            print(f"[配置提示] 目标总仓位 {per_pos*k:.0%} > 总仓位上限 {tpm:.0%}"
+                  f" → 约有 {(per_pos*k-tpm)/per_pos:.1f} 只会买不进；"
+                  f"若是有意留现金缓冲可忽略")
+
+        if warn:
+            print("[配置冲突] 检测到以下互相矛盾的设置：")
+            for w in warn:
+                print(f"    ⚠️ {w}")
 
     # ------------------------------------------------------------------ 准备
     def _prepare(self) -> list[date]:
@@ -243,6 +291,7 @@ class BacktestEngine:
             account_id=self.cfg.execution.account_id,
         )
         self._rejected_count = 0
+        self._reject_reasons: dict[str, int] = {}
 
         equity_curve: list[EquityPoint] = []
         pending_orders: list[Order] = []
@@ -250,6 +299,9 @@ class BacktestEngine:
         # 暴露度诊断序列（见第 5 步的说明）
         self._expo_series: list[float] = []
         self._nhold_series: list[int] = []
+        # 每日"够格"股票数与参与打分数（解释仓位的证据链）
+        self._npass_series: list[int] = []
+        self._nscored_series: list[int] = []
 
         for i, d in enumerate(dates):
             ds = d.isoformat()
@@ -313,6 +365,17 @@ class BacktestEngine:
                     # 因子打分 → 组合 → 订单
                     preds = self._score_at(ds)
                     self._last_predictions = preds
+                    # 记录"有多少只股票够格"——这是解释仓位的第一手证据。
+                    # TopKPortfolio 的权重固定为 1/top_k，所以
+                    # **实际仓位 ≈ 达标只数 × 单只权重**。若不记录这个数，
+                    # "仓位为什么只有 27%"就只能靠猜。
+                    try:
+                        thr = float(getattr(self.portfolio, "min_score", 0.0) or 0.0)
+                        self._npass_series.append(
+                            sum(1 for p in preds if p.score >= thr))
+                        self._nscored_series.append(len(preds))
+                    except Exception:  # noqa: BLE001
+                        pass
                     # ⚠️ 必须用**真实价** close_raw，不能用后复权 close。
                     #
                     # 账户的现金/成本/市值都在真实价尺度上结算（sim_gateway
@@ -332,6 +395,14 @@ class BacktestEngine:
                         orders, self.gateway.account, day_bars
                     )
                     self._rejected_count += len(rejected)
+                    # 记录拒单原因分布。只数"拒了多少单"没用 ——
+                    # 真正要回答的是"为什么拒"。曾靠它发现股票池用
+                    # "20 日日均成交额 ≥ 2e7"选股、风控却用"当日成交额 ≥ 1e8"
+                    # 卡单：两道门槛差 5 倍且语义不同，大量买单被静默砍掉。
+                    for _o, _why in rejected:
+                        # 去掉具体数字，只留原因类别，便于聚合
+                        key = _why.split("（")[0].split("(")[0].strip()
+                        self._reject_reasons[key] = self._reject_reasons.get(key, 0) + 1
                     tomorrow_orders.extend(approved)
 
                 # 提交：**必须收集 submit_order 的返回值**，
@@ -419,7 +490,7 @@ class BacktestEngine:
         if not e:
             return {}
         n = len(e)
-        return {
+        s = {
             "avg_exposure": round(sum(e) / n, 4),
             "median_exposure": round(sorted(e)[n // 2], 4),
             "min_exposure": round(min(e), 4),
@@ -428,7 +499,18 @@ class BacktestEngine:
             "n_days": n,
             "avg_holdings": round(sum(self._nhold_series) / n, 2) if self._nhold_series else 0,
             "max_holdings": max(self._nhold_series) if self._nhold_series else 0,
+            "rejected_orders": int(getattr(self, "_rejected_count", 0) or 0),
+            "reject_reasons": dict(sorted(
+                getattr(self, "_reject_reasons", {}).items(),
+                key=lambda kv: -kv[1])[:8]),
         }
+        ns = self._nscored_series
+        if ns:
+            s["avg_scored"] = round(sum(ns) / len(ns), 1)
+            s["avg_qualified"] = round(sum(self._npass_series) / len(self._npass_series), 2)
+            s["top_k"] = int(getattr(self.portfolio, "top_k", 0) or 0)
+            s["min_score"] = float(getattr(self.portfolio, "min_score", 0.0) or 0.0)
+        return s
 
     def _print_exposure(self) -> None:
         s = self._exposure_stats()
@@ -438,6 +520,14 @@ class BacktestEngine:
               f"{s['median_exposure']*100:.1f}% | 满仓(>90%) "
               f"{s['days_over_90pct']}/{s['n_days']} 天 | 平均持仓 "
               f"{s['avg_holdings']} 只（峰值 {s['max_holdings']}）")
+        if s.get("avg_qualified") is not None:
+            print(f"       参与打分 {s['avg_scored']} 只 / 过 min_score={s['min_score']} "
+                  f"的 {s['avg_qualified']} 只（top_k={s['top_k']}）"
+                  f"{'  ← top_k 几乎从未填满' if s['avg_qualified'] < s['top_k'] * 0.7 else ''}")
+        if s.get("rejected_orders"):
+            print(f"       风控拒单 {s['rejected_orders']} 笔")
+            for why, cnt in (s.get("reject_reasons") or {}).items():
+                print(f"           · {why}：{cnt}")
         if s["avg_exposure"] < 0.6:
             print("       ⚠️ 平均仓位偏低 —— 先排查工程问题（价格量纲/最小手数/风控），"
                   "不要把低 beta 当成选股能力")

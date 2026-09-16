@@ -32,7 +32,13 @@ risk:
   total_position_max: 0.95
   stop_loss: 0.08
   max_drawdown: 0.20
-  liquidity_min_turnover: 100000000.0   # 日均成交额门槛 1 亿元
+  # 单**日**成交额门槛（元）。默认 0 = 关闭。
+  # 旧值 1e8 与股票池的"20 日日均 2e7"差 5 倍，20 只目标里平均只有 5 只
+  # 买得进，仓位被压到 27%（详见报告 7.12）。现在流动性由两处分工负责：
+  #   universe.min_turnover（能不能投） + liquidity_order_ratio（能吃多少）
+  liquidity_min_turnover: 0.0
+  # 相对流动性：单笔订单金额 ≤ 当日成交额 / ratio（0 = 不启用）
+  liquidity_order_ratio: 10.0
 
 model:
   cross_section: lightgbm

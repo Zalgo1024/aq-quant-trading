@@ -80,6 +80,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--force-panel", action="store_true",
                    help="强制重建因子面板缓存。补过股本/行情等底层数据后必须加，"
                         "否则面板一直吃旧缓存，改了数据也看不出变化")
+    p.add_argument("--risk-turnover", type=float, default=None,
+                   help="覆盖 risk.liquidity_min_turnover（单日成交额门槛）。"
+                        "用于实测该门槛对仓位的压制程度，默认沿用配置")
+    p.add_argument("--scan-risk", default="",
+                   help="对 --risk-turnover 的多个取值各跑一遍（逗号分隔，单位元）。"
+                        "例如 1e8,2e7,0 —— 与 --hold-scan 不能同时用")
     p.add_argument("--weights", default="both",
                    choices=["both", "prior", "ic"],
                    help="跑哪些权重方案。--hold-scan 时建议用 ic（更省时间）")
@@ -262,6 +268,57 @@ def main(argv: list[str] | None = None) -> int:
         print(f"    {k:22s} {v:+.4f}")
     print(f"    Σ|w| = {sum(abs(x) for x in w.values()):.4f}")
     n_active = len(scorer.active_factors())
+
+    # ---- 风控流动性门槛扫描 ----
+    # 为什么要扫这个：股票池按"20 日日均成交额 ≥ 2e7"选股，风控却按
+    # "单日成交额 ≥ 1e8"卡单 —— 两道门槛差 5 倍且语义不同，20 只目标里
+    # 平均只有 5 只买得进，仓位被压在 27%。扫一遍就能把这条因果链钉死。
+    if args.scan_risk:
+        vals = [float(x) for x in str(args.scan_risk).split(",") if x.strip()]
+        h = args.rebalance_days or 10
+        rows = []
+        for v in vals:
+            cfg.risk.liquidity_min_turnover = v
+            print(f"\n[风险门槛] 单日成交额 ≥ {v/1e8:.2f} 亿 | 调仓间隔 {h} 日")
+            r = _run_one(cfg, f"turnover>={v:g}", bt_rebalance_days=h)
+            r["risk_turnover"] = v
+            rows.append(r)
+
+        df = pd.DataFrame(rows)
+        cols = ["risk_turnover", "total_return", "sharpe", "max_drawdown",
+                "alpha", "beta", "information_ratio", "n_trades"]
+        for c in ("avg_exposure", "avg_holdings"):
+            if c in df.columns and df[c].notna().any():
+                cols.append(c)
+        if "rejected_orders" in df.columns:
+            cols.append("rejected_orders")
+        show = df[cols].copy()
+        for c in ("total_return", "max_drawdown", "alpha", "avg_exposure"):
+            if c in show.columns and show[c].dtype.kind == "f":
+                show[c] = (show[c] * 100).round(2)
+        show["risk_turnover"] = (show["risk_turnover"] / 1e8).round(3)
+        print("\n" + "=" * 110)
+        print(f"风控流动性门槛扫描（{args.start} ~ {args.end} | 池子 {args.universe}"
+              f" | 调仓间隔 {h} 日）")
+        print("=" * 110)
+        print("  risk_turnover 单位：亿元；收益/alpha/仓位 单位：%")
+        print(show.to_string(index=False))
+
+        out = {
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "period": {"start": args.start, "end": args.end},
+            "universe": args.universe,
+            "benchmark": getattr(cfg.backtest, "benchmark", None),
+            "weight_basis": str(vdir.relative_to(PROJECT_ROOT)),
+            "mode": "risk_scan",
+            "rebalance_days": h,
+            "rows": rows,
+        }
+        suffix = f"_{args.tag}" if args.tag else ""
+        p = OUT_DIR / f"ab_riskscan_{args.universe}{suffix}.json"
+        p.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"\n[落盘] {p}")
+        return 0
 
     # ---- 调仓频率扫描模式 ----
     if args.hold_scan:

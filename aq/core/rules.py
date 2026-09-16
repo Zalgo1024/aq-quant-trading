@@ -53,7 +53,11 @@ DEFAULT_RISK = {
     "total_position_max": 0.95,    # 总仓位上限
     "stop_loss": 0.08,             # 个股止损线
     "max_drawdown": 0.20,          # 组合最大回撤警戒
-    "liquidity_min_turnover": 1e8, # 日均成交额门槛（元）
+    # 单日成交额门槛。默认 0 = 不启用（流动性改由 universe.min_turnover
+    # 与 liquidity_order_ratio 分工负责；旧值 1e8 会把仓位压到 27%）
+    "liquidity_min_turnover": 0.0,
+    # 相对流动性：单笔订单金额 ≤ 当日成交额 / ratio。0 = 不启用
+    "liquidity_order_ratio": 10.0,
 }
 
 # --------------------------------------------------------------------------

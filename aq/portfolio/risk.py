@@ -20,6 +20,7 @@ class RiskLimit:
     stop_loss: float = DEFAULT_RISK["stop_loss"]
     max_drawdown: float = DEFAULT_RISK["max_drawdown"]
     liquidity_min_turnover: float = DEFAULT_RISK["liquidity_min_turnover"]
+    liquidity_order_ratio: float = DEFAULT_RISK["liquidity_order_ratio"]
     # 黑名单：ST / 退市 / 停牌
     blacklist: set[str] = field(default_factory=set)
     # 行业映射（symbol -> 行业名）
@@ -35,6 +36,7 @@ class RiskLimit:
             stop_loss=r.stop_loss,
             max_drawdown=r.max_drawdown,
             liquidity_min_turnover=r.liquidity_min_turnover,
+            liquidity_order_ratio=getattr(r, "liquidity_order_ratio", 0.0),
         )
 
 
@@ -69,9 +71,27 @@ class RiskEngine:
             if order.side == Side.SELL and bar.close <= bar.limit_down + 1e-6:
                 return False, "跌停板无法卖出"
 
-        # 4) 流动性门槛
-        if bar is not None and bar.amount and bar.amount < lim.liquidity_min_turnover:
-            return False, f"流动性不足（成交额 {bar.amount / 1e8:.2f} 亿 < 门槛 {lim.liquidity_min_turnover / 1e8:.2f} 亿）"
+        # 4) 流动性门槛（绝对 + 相对两道）
+        #
+        # 绝对门槛必须与股票池的流动性过滤同量级，否则会出现
+        # "选得进却买不进"的静默冲突（详见 RiskConfig 的注释）。
+        # 相对门槛保证订单不会占当日成交额过大比例 —— 这一条与组合规模无关，
+        # 是真正对应冲击成本的约束。
+        if bar is not None and bar.amount:
+            if bar.amount < lim.liquidity_min_turnover:
+                return False, (
+                    f"流动性不足（当日成交额 {bar.amount / 1e8:.2f} 亿 < 门槛 "
+                    f"{lim.liquidity_min_turnover / 1e8:.2f} 亿）"
+                )
+            ratio = getattr(lim, "liquidity_order_ratio", 0.0) or 0.0
+            if ratio > 0 and order.side == Side.BUY:
+                px = order.limit_price or bar.close_raw
+                order_value = px * order.qty
+                if order_value * ratio > bar.amount:
+                    return False, (
+                        f"订单占比过高（{order_value:.0f} 元 × {ratio:.0f} > "
+                        f"当日成交额 {bar.amount / 1e8:.2f} 亿）"
+                    )
 
         # 5) 卖出：不可裸卖空 + T+1
         if order.side == Side.SELL:
