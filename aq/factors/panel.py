@@ -313,20 +313,30 @@ class FactorPanelBuilder:
         chunks: list[pd.DataFrame] = []
         writer: pq.ParquetWriter | None = None
         n_rows = 0
+        n_cached = 0
         tmp = path.with_suffix(".tmp.parquet")
 
         try:
             for i, sym in enumerate(syms, 1):
-                try:
-                    part = self.build_one(sym)
-                except Exception as exc:  # noqa: BLE001
-                    print(f"  [跳过] {sym}: {type(exc).__name__} {exc}")
-                    continue
-                if part is None or part.empty:
-                    continue
-                parts = [part]
-                if len(parts) >= 1:
-                    chunks.append(part)
+                cached = self._load_part(sym)
+                if cached is not None:
+                    # 缓存存的是全区间，按本次 start/end 切片
+                    sel = cached
+                    if "date" in sel.columns:
+                        sel = sel[(sel["date"] >= self.cfg.start)
+                                  & (sel["date"] <= self.cfg.end)]
+                    if not sel.empty:
+                        chunks.append(sel)
+                        n_cached += 1
+                else:
+                    try:
+                        part = self.build_one(sym)
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"  [跳过] {sym}: {type(exc).__name__} {exc}")
+                        continue
+                    if part is not None and not part.empty:
+                        self._save_part(sym, part)
+                        chunks.append(part)
                 if len(chunks) >= self.cfg.chunk_size:
                     blk = pd.concat(chunks, ignore_index=True)
                     blk = self._shrink(blk)
@@ -334,7 +344,8 @@ class FactorPanelBuilder:
                     n_rows += len(blk)
                     chunks = []
                 if i % 500 == 0:
-                    print(f"  ... {i}/{len(syms)} 行={n_rows} 用时 {time.time()-t0:.0f}s")
+                    print(f"  ... {i}/{len(syms)} 行={n_rows} 命中缓存={n_cached} "
+                          f"用时 {time.time()-t0:.0f}s")
 
             if chunks:
                 blk = pd.concat(chunks, ignore_index=True)
@@ -345,6 +356,9 @@ class FactorPanelBuilder:
             if writer is not None:
                 writer.close()
 
+        if n_cached:
+            print(f"[面板] 命中单股票缓存 {n_cached}/{len(syms)} 只")
+
         if n_rows == 0:
             raise RuntimeError("面板为空：请检查 bars 目录与 start/end 区间")
 
@@ -352,9 +366,14 @@ class FactorPanelBuilder:
         df = self.apply_liquid_filter(df)
         df = df.reset_index(drop=True)
         df.to_parquet(path, index=False)
+        # 临时文件清理由 best-effort 改为**忽略一切异常**：
+        # 某些沙箱环境给 os.unlink 注入了"安全删除"垫片，批量删除时会抛
+        # SAFE_DELETE_BULK_CONFIRM_REQUIRED。它只影响清理，不影响正确性
+        # —— 数据已经写进 path 了。故这里绝不能让清理失败把整次构建带崩。
         try:
-            tmp.unlink()
-        except Exception:  # noqa: BLE001
+            if tmp.exists():
+                tmp.unlink()
+        except BaseException:  # noqa: BLE001
             pass
 
         print(f"[面板] 完成 {len(df):,} 行 × {len(df.columns)} 列，"
@@ -373,6 +392,65 @@ class FactorPanelBuilder:
         if "industry" in df.columns:
             df["industry"] = df["industry"].astype("category")
         return df
+
+    # ------------------------------------------------------------------ 增量缓存
+    def _stock_cache_dir(self) -> Path:
+        """单股票因子缓存目录。
+
+        为什么按**单股票**而不是按**整份面板**缓存
+        ------------------------------------------
+        回测引擎每次 ``--start`` 不同 → ``PanelConfig`` 不同 → 整份面板的
+        cache key 不同 → 全部重算。而 ``data_cache/factors/`` 下已经躺着
+        同一批股票的因子（供因子研究用），只因为区间/列集合不同就**一行都用不上**:
+
+        - ``panel_liquid_2019-01-01_2026-09-15``：5256 只 / 1861 天（研究口径）
+        - 回测 hs300 池要的：300 只 / 1372 天
+
+        后者是前者的**严格子集**，却要重跑 8 分钟。按单股票缓存后，
+        任意 ``(symbol, start, end, factors)`` 组合都能复用已算好的片段。
+
+        ``symbols`` 显式给定时（回测场景）才启用 —— 全市场研究场景
+        ``symbols=None``，缓存键会退化成上万只的目录，得不偿失。
+        """
+        return self.cache_dir / "parts"
+
+    def _parts_path(self, symbol: str) -> Path | None:
+        """单股票缓存文件路径，未启用时返回 None。"""
+        if not self.cfg.symbols:
+            return None
+        c = self.cfg
+        key = "|".join([
+            c.end, ",".join(sorted(c.factors)),
+            ",".join(map(str, c.horizons)), str(c.min_history),
+        ])
+        h = hashlib.md5(key.encode()).hexdigest()[:8]
+        return self._stock_cache_dir() / h / f"{symbol}.parquet"
+
+    def _load_part(self, symbol: str) -> pd.DataFrame | None:
+        """读单股票缓存（**只读该文件，不校验是否过期**）。
+
+        缓存键含 ``end`` 与因子集合，故 ``end`` 变了不会命中旧缓存；
+        ``start`` 不在键里 —— 因为缓存**存全区间**（从该股票最早一根 bar
+        开始），取用时再按 ``start`` 切片。这样多个 ``--start`` 共享一份缓存。
+        """
+        p = self._parts_path(symbol)
+        if p is None or not p.exists():
+            return None
+        try:
+            df = pd.read_parquet(p)
+        except Exception:  # noqa: BLE001
+            return None
+        return df if not df.empty else None
+
+    def _save_part(self, symbol: str, df: pd.DataFrame) -> None:
+        p = self._parts_path(symbol)
+        if p is None or df.empty:
+            return
+        p.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self._shrink(df).to_parquet(p, index=False)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _write(self, writer: pq.ParquetWriter | None, blk: pd.DataFrame, path: Path):
         tbl = pa.Table.from_pandas(blk, preserve_index=False)

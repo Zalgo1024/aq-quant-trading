@@ -29,7 +29,7 @@ from aq.core.models import (
 )
 from aq.data.index_store import IndexBarStore, IndexDataMissing
 from aq.data.provider import DataProvider, get_provider
-from aq.data.universe import UniverseSelector
+from aq.data.universe import INDEX_ALIAS, UniverseSelector, _to_date
 from aq.execution.sim_gateway import SimGateway
 from aq.factors.library import FactorLibrary
 from aq.factors.scoring import build_scorer
@@ -64,6 +64,9 @@ class BacktestEngine:
         self._bars: dict[str, dict[str, Bar]] = {}   # symbol -> date -> Bar
         self._last_predictions = []
         self._rejected_count = 0
+        # 调仓间隔（交易日）。原先引擎无条件每日调仓，backtest.freq 从未被
+        # 消费；日频调仓的交易成本会吃掉全部 alpha（P2 归因已证）。
+        self._rebalance_days = self._parse_rebalance_days(cfg)
         # P2：预计算的因子矩阵 {date: DataFrame(index=symbol, columns=因子)}
         # 用它替代"每天对每只股票重算一遍因子"——后者在因子数从 10 增到 27 后
         # 复杂度爆炸（回测从秒级掉到十几分钟）。
@@ -90,6 +93,12 @@ class BacktestEngine:
             # 兜底：本地有行情的全部
             self.symbols = [s["symbol"] for s in stocks][: self.cfg.model.top_k * 3]
 
+        # 逐期入池：见 _pool_refresh_dates()。池子**只增不减**（成分表无剔除
+        # 日期），故本期新增的成分在后续所有期都保留。
+        self._selector = selector
+        self._pool_refresh = self._pool_refresh_dates()
+        self._pool_growth: list[tuple[str, int, int]] = []   # (日期, 新增, 池内总数)
+
         # 行业 / 黑名单映射（风控用）
         meta = {s["symbol"]: s for s in stocks}
         self.risk.limit.industry_map = {
@@ -108,26 +117,65 @@ class BacktestEngine:
         print(f"股票池：{len(self.symbols)} 只（universe.index="
               f"{getattr(self.cfg.universe, 'index', 'all')}）")
 
+        # 逐期入池的**全集**：把全区间内会入池的股票一次算清，行情与因子
+        # 都在 `_prepare()` 里一次建好。
+        #
+        # 为什么要提前算全集、而不是每次调整时补一批
+        # --------------------------------------------
+        # 沪深300 每年 6/12 月各调一次，6 年有 12 次调整。若每次只补当批
+        # 新增的 5~19 只，会连续触发 12 次 ``FactorPanelBuilder``，
+        # 落盘 12 份碎片 parquet（实测 266KB ~ 4.5MB 各一份），既慢又脏，
+        # 且每份的 cache key 都不同、永远无法复用。
+        # 一次算 300 只只需 ~4s（见单股票增量缓存），代价可以忽略。
+        self._pending_growth: dict[str, list[str]] = {}
+        if self._pool_refresh:
+            all_syms = set(self.symbols)
+            for p in sorted(self._pool_refresh):
+                try:
+                    all_syms.update(selector.target_pool(asof=p))
+                except Exception:  # noqa: BLE001
+                    pass
+            extra = sorted(all_syms - set(self.symbols))
+            if extra:
+                self._growth_symbols = extra
+                print(f"股票池：逐期入池预备 {len(extra)} 只"
+                      f"（{len(self._pool_refresh)} 个调整时点，期末目标 "
+                      f"{len(all_syms)} 只）")
+            else:
+                self._growth_symbols = []
+
         all_dates: set[date] = set()
-        for sym in self.symbols:
+        load_syms = self.symbols + list(self._growth_symbols)
+        for sym in load_syms:
             bars = self.provider.get_daily(sym, self.cfg.backtest.start, self.cfg.backtest.end)
             self._bars[sym] = {b.time.strftime("%Y-%m-%d"): b for b in bars}
             all_dates.update(b.time.date() for b in bars)
 
-        self._build_factor_panel()
+        # 因子面板**一次建全**（含未来才会入池的股票）
+        self._build_factor_panel(load_syms)
         return sorted(all_dates)
 
     # ------------------------------------------------------------- 因子面板
-    def _build_factor_panel(self) -> None:
+    def _build_factor_panel(self, symbols: list[str] | None = None,
+                            label: str = "") -> None:
         """一次性把回测区间内所有股票的因子算好，按日期切片缓存。
 
         走 :mod:`aq.factors.panel` 的向量化内核，与因子研究用的是同一套算法，
         因此"研究里有效的因子"和"回测里用的因子"不可能对不上。
         失败时静默降级为逐日标量计算（慢但不会阻塞流程）。
+
+        ``symbols`` 给定时只算这批（用于补算逐期入池的新成分）。
+        **不要对每个小的入池批次各建一次面板** —— 12 次调整会生成 12 份
+        碎片 parquet（实测 266KB ~ 4.5MB 各一份），既慢又脏。
+        正确做法见 :meth:`_prepare`：先把全区间会入池的股票一次算完。
         """
         from aq.factors.panel import FactorPanelBuilder, PanelConfig
 
-        dates = sorted({d for m in self._bars.values() for d in m})
+        syms = list(symbols) if symbols else list(self.symbols)
+        if not syms:
+            return
+        # 用"已加载行情"的日期做区间，而不是全市场
+        dates = sorted({d for s in syms for d in self._bars.get(s, {})})
         if not dates:
             return
         try:
@@ -136,7 +184,7 @@ class BacktestEngine:
                 end=dates[-1],
                 universe="all",
                 factors=list(self.library.names),
-                symbols=list(self.symbols),
+                symbols=syms,
             )
             panel = FactorPanelBuilder(pcfg).build()
         except Exception as exc:  # noqa: BLE001
@@ -146,10 +194,17 @@ class BacktestEngine:
 
         fac_cols = [c for c in self.library.names if c in panel.columns]
         panel = panel[["date", "symbol"] + fac_cols]
-        self._panel = {d: g.set_index("symbol")[fac_cols]
-                       for d, g in panel.groupby("date", sort=False)}
-        print(f"因子面板：{len(panel):,} 行 / {len(self._panel)} 个交易日 / "
-              f"{len(fac_cols)} 个因子")
+        for d, g in panel.groupby("date", sort=False):
+            sub = g.set_index("symbol")[fac_cols]
+            if d in self._panel:
+                # 并入已有截面：同 symbol 以本次为准
+                dup = [s for s in sub.index if s in self._panel[d].index]
+                base = self._panel[d].drop(index=dup, errors="ignore")
+                self._panel[d] = pd.concat([base, sub])
+            else:
+                self._panel[d] = sub
+        print(f"[因子面板{label}] {len(panel):,} 行 / {len(self._panel)} 个交易日 / "
+              f"{len(fac_cols)} 个因子 / {len(syms)} 只")
 
     def _factors_at(self, ds: str) -> dict[str, dict[str, float | None]]:
         """取 ds 日（含）为止的因子横截面。"""
@@ -191,6 +246,13 @@ class BacktestEngine:
         for i, d in enumerate(dates):
             ds = d.isoformat()
 
+            # ---------- 0) 逐期入池（成分调整生效日）----------
+            #
+            # 必须在撮合与打分**之前**：新纳入的成分当天就该可交易，
+            # 否则它们要等到下一次调整才有资格进组合（等于把纳入日
+            # 往后推了一年，是前视偏差的镜像错误）。
+            self._grow_pool(ds)
+
             # ---------- 1) 开盘前 ----------
             self.gateway.on_new_day(ds)
 
@@ -215,7 +277,10 @@ class BacktestEngine:
             if i + 1 < len(dates):
                 tomorrow_orders: list[Order] = []
 
-                # 止损检查（生成卖出单）
+                # 止损检查（**每日都做**）
+                #
+                # 止损是风控动作，不能因为"不在调仓日"就跳过 —— 否则持仓
+                # 会裸奔到最后一次调仓日之后才检查。
                 for sym, reason in self.risk.check_stop_loss(self.gateway.account):
                     pos = self.gateway.account.positions.get(sym)
                     if pos and pos.available >= 100:
@@ -231,18 +296,24 @@ class BacktestEngine:
                             )
                         )
 
-                # 因子打分 → 组合 → 订单
-                preds = self._score_at(ds)
-                self._last_predictions = preds
-                prices = {s: b.close for s, b in day_bars.items()}
-                orders = self.portfolio.construct(preds, self.gateway.account, prices)
+                # 因子调仓（**按调仓周期**）
+                #
+                # 日频调仓的成本会吃掉全部 alpha（P2 归因已证）。引擎原先
+                # 无条件每日调仓，`backtest.freq` 配置项从未被消费。
+                # 现在按 `rebalance_days` 间隔调仓：持有 N 天再换股。
+                if self._is_rebalance_day(i):
+                    # 因子打分 → 组合 → 订单
+                    preds = self._score_at(ds)
+                    self._last_predictions = preds
+                    prices = {s: b.close for s, b in day_bars.items()}
+                    orders = self.portfolio.construct(preds, self.gateway.account, prices)
 
-                # 组合级风控
-                approved, rejected = self.risk.portfolio_check(
-                    orders, self.gateway.account, day_bars
-                )
-                self._rejected_count += len(rejected)
-                tomorrow_orders.extend(approved)
+                    # 组合级风控
+                    approved, rejected = self.risk.portfolio_check(
+                        orders, self.gateway.account, day_bars
+                    )
+                    self._rejected_count += len(rejected)
+                    tomorrow_orders.extend(approved)
 
                 # 提交：**必须收集 submit_order 的返回值**，
                 # 因为 oid 是在提交时才生成的；直接 append 原对象会拿到空 oid，
@@ -262,6 +333,15 @@ class BacktestEngine:
 
         # ------------------------------------------------------------------ 收尾
         self.gateway.persist()
+
+        if self._pool_growth:
+            n_new = sum(g[1] for g in self._pool_growth)
+            print(f"[池子] 逐期入池 {len(self._pool_growth)} 次，累计新增 "
+                  f"{n_new} 只 → 期末 {self.symbols.__len__()} 只")
+            for dt, k, tot in self._pool_growth[:3]:
+                print(f"    {dt} +{k} → {tot}")
+            if len(self._pool_growth) > 3:
+                print(f"    ...（共 {len(self._pool_growth)} 次）")
 
         # 基准对齐：把沪深300（或配置指定指数）的日收益按**同一交易日序列**
         # 对齐到策略权益曲线上，供 alpha/beta/信息比率计算使用。
@@ -287,6 +367,102 @@ class BacktestEngine:
             config=self.cfg.model_dump(mode="json"),
             created_at=datetime.now(),
         )
+
+    # ------------------------------------------------------------------ 调仓周期
+    def _pool_refresh_dates(self) -> set[str]:
+        """逐期入池的时点（交易日字符串）。
+
+        为什么要逐期入池
+        ----------------
+        原先只在 ``_prepare()`` 里做一次 ``select(asof=backtest.start)``，
+        池子**在整个回测期内冻结**。后果是：2021-01-01 起点下，池内只有
+        **183 只**（成分表里 ``in_date <= 2021-01-01`` 的那些），回测跑完
+        6 年也还是 183 只 —— 2021 年之后才被纳入沪深300 的 117 只**从来没
+        被交易过**。而 asof=2026-09-15 时池子是 300 只，所以"改一下起点，
+        结果就变了"。
+
+        本方法给出需要刷新池子的时点：成分表里所有落在回测区间内的
+        ``in_date``（也就是每年的成分调整生效日）。引擎在这些日子
+        把新纳入的成分**并进**已加载的行情与因子面板。
+        """
+        code = INDEX_ALIAS.get(str(
+            getattr(getattr(self.cfg, "universe", None), "index", "hs300")
+        ).lower())
+        if code is None:
+            return set()
+        try:
+            cons = self._selector.constituents
+        except Exception:  # noqa: BLE001
+            return set()
+        if cons.empty or "in_date" not in cons.columns:
+            return set()
+        sub = cons[cons["index_code"] == code]
+        in_d = pd.to_datetime(sub["in_date"], errors="coerce").dropna()
+        lo = pd.Timestamp(_to_date(self.cfg.backtest.start))
+        hi = pd.Timestamp(_to_date(self.cfg.backtest.end))
+        sel = in_d[(in_d > lo) & (in_d <= hi)]
+        return {t.date().isoformat() for t in sel}
+
+    def _grow_pool(self, ds: str) -> None:
+        """把 ``ds`` 日应当新纳入的成分并进池子。
+
+        行情与因子都已在 :meth:`_prepare` 里**一次算全**（含未来才入池的
+        股票），故本方法只做一件事：把这些符号从"已加载但不在池内"
+        移进 ``self.symbols``。因此它极快，且天然幂等
+        —— 重复调用不会重复加载、不会重复建面板。
+        """
+        if ds not in self._pool_refresh:
+            return
+        try:
+            want = set(self._selector.target_pool(asof=ds))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[警告] {ds} 池子刷新失败（{type(exc).__name__} {exc}），沿用当前池子")
+            return
+        have = set(self.symbols)
+        added = sorted(s for s in want - have if s in self._bars)
+        if not added:
+            return
+        # 池子顺序保持稳定（原顺序 + 新增），避免打分时选股顺序漂移
+        self.symbols = self.symbols + added
+        self._pool_growth.append((ds, len(added), len(self.symbols)))
+
+    # ------------------------------------------------------------------ 调仓周期
+    def _is_rebalance_day(self, i: int) -> bool:
+        """第 ``i`` 个交易日是否调仓。
+
+        支持两种配置写法（``config/*.yaml``）::
+
+            backtest:
+              freq: 1d          # 每日调仓（默认）
+              freq: 10d         # 每 10 个交易日调仓一次
+              rebalance_days: 5 # 显式天数，优先级高于 freq
+
+        ``rebalance_days`` 显式配置优先；否则从 ``freq`` 解析 ``Nd`` 形式。
+        解析失败时退回 1（日频），保持向后兼容。
+        """
+        n = getattr(self, "_rebalance_days", 1) or 1
+        return i % n == 0
+
+    @staticmethod
+    def _parse_rebalance_days(cfg) -> int:  # type: ignore[no-untyped-def]
+        """从配置解析调仓间隔（交易日）。"""
+        raw = getattr(cfg.backtest, "rebalance_days", None)
+        if raw:
+            try:
+                n = int(raw)
+                if n >= 1:
+                    return n
+            except (TypeError, ValueError):
+                pass
+
+        freq = str(getattr(cfg.backtest, "freq", "1d") or "1d").strip().lower()
+        if freq.endswith("d") and freq[:-1].isdigit():
+            return max(1, int(freq[:-1]))
+        if freq in ("1d", "daily", ""):
+            return 1
+        # 其他频率（1m/1w 等）暂不支持日线回测，退回日频并提示
+        print(f"[警告] 不支持的 backtest.freq={freq!r}，按日频调仓处理")
+        return 1
 
     # ------------------------------------------------------------------ 基准
     def _benchmark_returns(

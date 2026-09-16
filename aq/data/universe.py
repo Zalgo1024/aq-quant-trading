@@ -204,6 +204,73 @@ class UniverseSelector:
         return out
 
     # ---------------------------------------------------------------- 诊断
+    def target_pool(
+        self,
+        index: str | None = None,
+        asof: str | date | None = None,
+        exclude_st: bool = True,
+        min_list_days: int | None = None,
+        min_turnover: float | None = None,
+        lookback: int = 20,
+        max_symbols: int | None = None,
+        require_data: bool = True,
+    ) -> list[str]:
+        """取 ``asof`` **之后**应当成为成分的那批股票（增量入池用）。
+
+        与 :meth:`select` 的关系
+        ------------------------
+        ``select(asof=T)`` 是「T 时点已知的池子」——它**只增不减**，
+        因为 ``index_constituents.parquet`` 里没有剔除日期。对**单点静态**
+        回测这是正确的（保守口径，见类 docstring）。
+
+        但"逐日滚动"若每天重新 ``select(asof=当日)``，池子会从 183 只
+        **单调铺开**到 300 只 —— 回测 2021 年初只有 183 只可选，这是
+        把「成分调整批次」误当成了「成分集合扩张」。
+
+        本方法返回 ``select(asof) - select(asof_prev)``，即两个时点之间
+        新纳入的成分。调用方把它**并进**已有池子，池子便逐期收敛到目标规模。
+
+        ⚠️ 仍未消除幸存者偏差
+        ---------------------
+        「曾经在指数里、后被调出」的股票**不在文件里**，因此并进来的都是
+        "最终还在指数里"的幸存者。本方法只能让**规模**随时间对了，
+        不能消除**选样**的幸存者偏差。两者的区别见类 docstring。
+        """
+        cur = set(self.select(
+            index=index, asof=asof, exclude_st=exclude_st,
+            min_list_days=min_list_days, min_turnover=min_turnover,
+            lookback=lookback, max_symbols=max_symbols, require_data=require_data,
+        ))
+        if asof is None:
+            return sorted(cur)
+
+        # 上一个批次时点：直接取成分表里「严格早于本时点」的最大 in_date。
+        # 用它比"上一个自然年"更贴近真实的调整批次（沪深300 每年 6/12 月
+        # 各调一次，in_date 恰好落在调整生效日）。
+        code = INDEX_ALIAS.get(str(
+            index if index is not None
+            else getattr(getattr(self.cfg, "universe", None), "index", "hs300")
+        ).lower())
+        if code is None:
+            return sorted(cur)
+
+        cons = self.constituents
+        if cons.empty or "in_date" not in cons.columns:
+            return sorted(cur)
+        sub = cons[cons["index_code"] == code].drop_duplicates(subset=["symbol"], keep="first")
+        in_d = pd.to_datetime(sub["in_date"], errors="coerce").dropna()
+        a = pd.Timestamp(_to_date(asof))
+        earlier = in_d[in_d < a]
+        if earlier.empty:
+            return sorted(cur)
+
+        prev = self.select(
+            index=index, asof=earlier.max(), exclude_st=exclude_st,
+            min_list_days=min_list_days, min_turnover=min_turnover,
+            lookback=lookback, max_symbols=max_symbols, require_data=require_data,
+        )
+        return sorted(cur - set(prev))
+
     def describe(self, index: str | None = None, asof=None) -> pd.DataFrame:
         """返回各环节的剔除统计，便于排查"为什么我的股票池是空的"。
 

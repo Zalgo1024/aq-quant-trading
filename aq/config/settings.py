@@ -47,7 +47,11 @@ class UniverseConfig(BaseModel):
     min_turnover:
         最近 lookback 日日均成交额下限（元），0 = 不过滤
     max_symbols:
-        池子规模上限，防止全市场 5000+ 只把内存吃光
+        池子规模上限，防止全市场 5000+ 只把内存吃光。0 = 不截断。
+        **默认 0（不截断）**：``max_symbols > 0`` 时按 ``stock_list.parquet``
+        的代码序取前 N 只，会无限期排除代码靠后的股票（北交所 8xxxxx/4xxxxx、
+        以及沪市 6xxxxx 里排在后面的部分），使池子**永不收敛到全市场**。
+        研究场景要的是完整池子，截断属于残余偏差，故默认关闭。
     """
 
     index: str = "hs300"
@@ -55,7 +59,7 @@ class UniverseConfig(BaseModel):
     min_list_days: int = 60
     min_turnover: float = 0.0
     lookback: int = 20
-    max_symbols: int = 500
+    max_symbols: int = 0
 
 
 class CostConfig(BaseModel):
@@ -70,6 +74,9 @@ class BacktestConfig(BaseModel):
     start: str = "2018-01-01"
     end: str = "2026-06-30"
     freq: str = "1d"
+    #: 调仓间隔（交易日）。显式配置优先级高于 ``freq``；不设时从 ``freq``
+    #: 解析（``1d``→1、``10d``→10）。日频调仓的成本会吃掉全部 alpha。
+    rebalance_days: int | None = None
     initial_cash: float = 1_000_000.0
     benchmark: str = "000300"
     cost: CostConfig = Field(default_factory=CostConfig)
