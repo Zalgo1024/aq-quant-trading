@@ -9,16 +9,25 @@
     若 IC 加权不能击败先验权重，说明"用实测 IC 定权"这件事在本因子集上
     没有增量价值，应当退回先验权重而不是自我说服。
 
+池子口径（``--universe``）
+-------------------------
+- ``hs300``（默认）：沪深300 成分池，**可交易实盘口径**。
+  注意它带**幸存者偏差**（拿不到历史成分，见 ``aq/data/universe.py``），
+  且池子大小随 ``asof`` 漂移（越早越小），故**跨起点不可比**。
+- ``liquid``：全市场流动性动态池（上市满 180 天 + 非 ST + 近 20 日日均
+  成交额 ≥ 2e7），**因子有效性研究口径**，与 ``factor_research`` 一致。
+  无成分依赖，不受幸存者偏差影响。
+
 跑法
 ----
-    E:/Python/python.exe scripts/ab_weight_test.py
-    E:/Python/python.exe scripts/ab_weight_test.py --start 2021-01-01 --end 2026-08-31
+    python scripts/ab_weight_test.py                          # hs300 池
+    python scripts/ab_weight_test.py --universe liquid         # 全市场池
+    python scripts/ab_weight_test.py --start 2021-01-01 --end 2026-08-31
 
 输出
 ----
 - 终端对比表
 - ``runtime/ab_weight_test/ab_result.json``  机器可读结论
-- ``runtime/ab_weight_test/ab_report.md``    人读报告片段
 """
 from __future__ import annotations
 
@@ -55,12 +64,44 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--cap", type=float, default=0.25)
     p.add_argument("--variant", default="full_neu",
                    help="用哪份因子研究结果定权（目录名）")
+    p.add_argument("--universe", default="hs300", choices=["hs300", "liquid", "all"],
+                   help="池子口径：hs300=可交易实盘池(含幸存者偏差)；"
+                        "liquid/all=全市场流动性池(研究口径)")
+    p.add_argument("--tag", default="",
+                   help="结果文件后缀标记，避免不同口径互相覆盖")
     return p.parse_args(argv)
 
 
 def _latest_variant_dir(name: str) -> Path | None:
     d = FACTOR_DIR / name
     return d if (d / "summary.csv").exists() else None
+
+
+def _apply_universe(cfg, universe: str) -> str:
+    """把池子口径写进 cfg，返回人类可读说明。
+
+    两种口径的实现路径不同（这是两套面板语义差异的根源）：
+
+    - ``hs300``：走 ``UniverseSelector`` 的指数池 —— 引擎侧
+      ``PanelConfig(universe="all", symbols=...)`` 会在**引擎决定池子后**
+      跳过流动性过滤。
+    - ``liquid``：让 ``UniverseSelector`` 不设指数（=全市场），并把流动性
+      门槛交给它在**引擎侧**独立完成，使其语义与
+      ``PanelConfig(universe="liquid")`` 对齐（上市满 180 天 + 非 ST +
+      近 20 日日均成交额 ≥ 2e7）。
+    """
+    if universe == "hs300":
+        cfg.universe.index = "hs300"
+        return "沪深300 成分池（可交易实盘口径；含幸存者偏差，跨起点不可比）"
+
+    # 全市场流动性池：与 aq.factors.panel.PanelConfig(universe="liquid") 对齐
+    cfg.universe.index = "all"
+    cfg.universe.min_list_days = 180          # 对齐 PanelConfig.min_list_days
+    cfg.universe.min_turnover = 2e7           # 对齐 PanelConfig.min_amount
+    cfg.universe.lookback = 20
+    cfg.universe.max_symbols = 0              # 0 = 不截断（避免按代码序取前 N 的偏置）
+    return ("全市场流动性池（研究口径；上市满 180 天 + 非 ST + "
+            "近 20 日日均成交额 ≥ 2e7，不限规模）")
 
 
 def _run_one(cfg, label: str, **over) -> dict:
@@ -84,10 +125,15 @@ def _run_one(cfg, label: str, **over) -> dict:
         "max_drawdown": get("max_drawdown"),
         "calmar": get("calmar"),
         "win_rate": get("win_rate"),
+        # 基准相关（接入沪深300 后为真实值；无基准时为 None）
+        "alpha": get("alpha"),
+        "beta": get("beta"),
+        "information_ratio": get("information_ratio"),
         "n_trades": len(res.trades),
         "elapsed_sec": round(el, 1),
         "weight_source": cfg.model.weight_source,
         "ic_weight_mode": cfg.model.ic_weight_mode,
+        "universe": cfg.universe.index,
     }
 
 
@@ -111,6 +157,10 @@ def main(argv: list[str] | None = None) -> int:
     cfg.backtest.start = args.start
     cfg.backtest.end = args.end
     cfg.backtest.initial_cash = args.capital
+
+    # 池子口径
+    uni_note = _apply_universe(cfg, args.universe)
+    print(f"\n[池子] {args.universe} —— {uni_note}")
 
     # 先看看 IC 加权会选出哪些因子、权重怎么分布（不跑回测，秒出）
     from aq.factors.scoring import build_scorer
@@ -140,16 +190,17 @@ def main(argv: list[str] | None = None) -> int:
 
     rows = [res_a, res_b]
     df = pd.DataFrame(rows)
-    show = df[["label", "total_return", "annual_return", "sharpe",
-               "max_drawdown", "calmar", "win_rate", "n_trades", "elapsed_sec"]].copy()
+    show = df[["label", "total_return", "annual_return", "sharpe", "max_drawdown",
+               "calmar", "alpha", "beta", "information_ratio",
+               "n_trades", "elapsed_sec"]].copy()
     for c in ("total_return", "annual_return", "max_drawdown"):
         if show[c].dtype.kind == "f":
             show[c] = (show[c] * 100).round(2)
 
     print("\n" + "=" * 118)
-    print(f"A/B 对照结果（{args.start} ~ {args.end}）")
+    print(f"A/B 对照结果（{args.start} ~ {args.end} | 池子 {args.universe}）")
     print("=" * 118)
-    print("  收益/回撤单位：%")
+    print("  收益/回撤单位：%；alpha 为年化超额；无基准时 alpha/beta/IR 为 None")
     print(show.to_string(index=False))
 
     def _f(v):
@@ -175,6 +226,9 @@ def main(argv: list[str] | None = None) -> int:
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "period": {"start": args.start, "end": args.end},
         "capital": args.capital,
+        "universe": args.universe,
+        "universe_note": uni_note,
+        "benchmark": getattr(cfg.backtest, "benchmark", None),
         "weight_basis": str(vdir.relative_to(PROJECT_ROOT)),
         "ic_factors": scorer.active_factors(),
         "n_ic_factors": n_active,
@@ -186,10 +240,11 @@ def main(argv: list[str] | None = None) -> int:
                   "max_drawdown_pp": round(d_mdd * 100, 3)},
         "ic_better": bool(better),
     }
-    (OUT_DIR / "ab_result.json").write_text(
-        json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    print(f"\n[落盘] {OUT_DIR / 'ab_result.json'}")
+    # 文件名带池子口径，避免两套结果互相覆盖
+    suffix = f"_{args.tag}" if args.tag else ""
+    out_path = OUT_DIR / f"ab_result_{args.universe}{suffix}.json"
+    out_path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"\n[落盘] {out_path}")
     return 0
 
 

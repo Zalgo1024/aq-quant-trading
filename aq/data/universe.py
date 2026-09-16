@@ -99,8 +99,20 @@ class UniverseSelector:
     ) -> list[str]:
         cfg_u = getattr(self.cfg, "universe", None)
         index = index if index is not None else (cfg_u.index if cfg_u else "hs300")
+
+        # ⚠️ 每个参数都要显式回落到配置，否则配置项会被**静默忽略**。
+        # 踩过的坑：`min_turnover` 原先只在显式传参时才生效，
+        # `config/*.yaml` 里写的 `universe.min_turnover` 从未被读取 ——
+        # 于是"流动性过滤"实际上从没执行过，且因返回结果与不过滤时
+        # 完全一致而不易察觉。
         min_list_days = (min_list_days if min_list_days is not None
                          else (cfg_u.min_list_days if cfg_u else 60))
+        min_turnover = (min_turnover if min_turnover is not None
+                        else (cfg_u.min_turnover if cfg_u else 0.0))
+        max_symbols = (max_symbols if max_symbols is not None
+                       else (cfg_u.max_symbols if cfg_u else None))
+        lookback = (lookback if lookback is not None
+                    else (cfg_u.lookback if cfg_u else 20))
 
         df = self.meta.copy()
         if df.empty:
