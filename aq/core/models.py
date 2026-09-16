@@ -310,9 +310,10 @@ class BacktestMetrics(BaseModel):
     win_rate: float = 0.0
     profit_loss_ratio: float = 0.0
     turnover: float = 0.0
-    information_ratio: float = 0.0
-    alpha: float = 0.0
-    beta: float = 0.0
+    # 以下三项**依赖基准序列**；未接入基准时为 None（不伪造）
+    information_ratio: float | None = None
+    alpha: float | None = None
+    beta: float | None = None
     # 防过拟合
     cscv: float | None = None
     deflated_sharpe: float | None = None

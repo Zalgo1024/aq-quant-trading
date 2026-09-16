@@ -28,6 +28,9 @@ models_registry/
 .vscode/
 .DS_Store
 
+# 助手工作区（会话日志等本地状态，不入库）
+.workbuddy/
+
 # 凭据（重要！）
 .env
 *.env

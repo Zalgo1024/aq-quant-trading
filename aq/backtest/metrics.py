@@ -1,7 +1,22 @@
 """绩效指标计算（对齐 quantstats 的常用指标口径）。
 
 含 A 股常用口径：年化收益（242 交易日）、夏普、索提诺、最大回撤、卡玛、
-胜率、盈亏比、换手率、信息比率。
+胜率、盈亏比、换手率、信息比率、alpha/beta。
+
+基准口径
+--------
+``alpha`` / ``beta`` / ``information_ratio`` 三个指标**必须有基准序列**
+才有意义。基准来自 ``data_cache/index_bars/``（见 ``aq.data.index_store``），
+由回测引擎读入后以 ``benchmark_rets`` 传入。
+
+**不传基准时不再伪造指标**：早期实现里 ``_alpha_beta`` 直接
+``return 0.0, 1.0``、``_information_ratio`` 用「自身收益/波动」冒充，
+与真实信息比率毫无关系（后者衡量的是**超额**收益的稳定性），却在报告
+里当作正常指标展示。现在的行为：
+
+- 传了基准 → 用真实 OLS 回归求 alpha/beta，用超额收益算信息比率；
+- 未传基准 → 这三个指标返回 ``None``（在 ``BacktestMetrics`` 里显式
+  标注为「未接基准」），调用方可据此决定是否展示。
 """
 
 from __future__ import annotations
@@ -18,7 +33,14 @@ def compute_metrics(
     initial_cash: float,
     fills: list[Fill] | None = None,
     risk_free_rate: float = 0.02,
+    benchmark_rets: list[float] | None = None,
 ) -> BacktestMetrics:
+    """算绩效指标。
+
+    ``benchmark_rets`` 为**与策略日收益逐日对齐**的基准日收益序列
+    （长度须与策略日收益一致）。为 ``None`` 时 alpha/beta/信息比率
+    返回 ``None``，不伪造。
+    """
     if len(equity) < 2:
         return BacktestMetrics()
 
@@ -48,8 +70,13 @@ def compute_metrics(
     win_rate, pl_ratio = _trade_stats(fills or [])
     turnover = _turnover(values, fills or [])
 
-    alpha, beta = _alpha_beta(rets)
-    ir = _information_ratio(rets)
+    # 基准相关指标：无基准则返回 None（不伪造）
+    bench = _align_benchmark(rets, benchmark_rets)
+    if bench is None:
+        alpha = beta = ir = None
+    else:
+        alpha, beta = _alpha_beta(rets, bench)
+        ir = _information_ratio(rets, bench)
 
     return BacktestMetrics(
         total_return=round(total_return, 4),
@@ -61,15 +88,37 @@ def compute_metrics(
         win_rate=round(win_rate, 4),
         profit_loss_ratio=round(pl_ratio, 3),
         turnover=round(turnover, 4),
-        information_ratio=round(ir, 3),
-        alpha=round(alpha, 4),
-        beta=round(beta, 3),
+        information_ratio=None if ir is None else round(ir, 3),
+        alpha=None if alpha is None else round(alpha, 4),
+        beta=None if beta is None else round(beta, 3),
     )
 
 
 # --------------------------------------------------------------------------
 # helpers
 # --------------------------------------------------------------------------
+
+
+def _align_benchmark(
+    rets: list[float], benchmark_rets: list[float] | None
+) -> list[float] | None:
+    """把基准收益对齐到策略收益长度；不匹配时返回 ``None`` 并提示。
+
+    宁可返回 ``None``（指标不展示）也不要拿错位的序列算出一个看起来
+    正常的假 alpha。
+    """
+    if benchmark_rets is None:
+        return None
+    b = [float(x) for x in benchmark_rets]
+    if len(b) == len(rets):
+        return b
+    if not b or not rets:
+        return None
+    print(
+        f"[警告] 基准序列长度({len(b)})与策略收益长度({len(rets)})不一致，"
+        f"alpha/beta/信息比率置为未计算"
+    )
+    return None
 
 
 def _max_drawdown(values: list[float]) -> tuple[float, float]:
@@ -147,16 +196,50 @@ def _turnover(values: list[float], fills: list[Fill]) -> float:
     return traded / avg_equity / years
 
 
-def _alpha_beta(rets: list[float]) -> tuple[float, float]:
-    """简化：以自身为基准时 alpha=0、beta=1；接入基准指数后可替换。"""
-    if not rets:
+def _alpha_beta(rets: list[float], benchmark_rets: list[float]) -> tuple[float, float]:
+    """对基准做 OLS 回归：``r_p = alpha + beta * r_b + eps``。
+
+    - ``beta = Cov(r_p, r_b) / Var(r_b)``
+    - ``alpha_daily = mean(r_p) - beta * mean(r_b)``，再年化：
+      ``alpha = alpha_daily * TRADING_DAYS_PER_YEAR``
+
+    年化口径说明：``alpha`` 是**年化超额**（算术年化，非复利），这是
+    业界对 alpha 的常见口径（对应「年化 alpha」报表值）。若基准方差为 0
+    （基准恒定）则退回 ``beta=0, alpha=年化策略收益``。
+    """
+    n = len(rets)
+    if n < 2 or len(benchmark_rets) != n:
         return 0.0, 0.0
-    return 0.0, 1.0
+
+    mu_p, mu_b = mean(rets), mean(benchmark_rets)
+    cov = sum((rets[i] - mu_p) * (benchmark_rets[i] - mu_b) for i in range(n)) / (n - 1)
+    var_b = sum((benchmark_rets[i] - mu_b) ** 2 for i in range(n)) / (n - 1)
+
+    if var_b <= 0:
+        return mu_p * TRADING_DAYS_PER_YEAR, 0.0
+
+    beta = cov / var_b
+    alpha_daily = mu_p - beta * mu_b
+    return alpha_daily * TRADING_DAYS_PER_YEAR, beta
 
 
-def _information_ratio(rets: list[float]) -> float:
-    """简化：无基准时用收益/波动近似。"""
-    if len(rets) < 2:
+def _information_ratio(rets: list[float], benchmark_rets: list[float]) -> float:
+    """信息比率 = 年化**超额**收益 / 跟踪误差。
+
+    ``excess = r_p - r_b``；``IR = mean(excess) / std(excess) * sqrt(252)``。
+
+    与夏普的区别：夏普除的是**绝对**波动，IR 除的是**相对基准**的跟踪
+    误差。早期实现用 ``mean(r_p)/std(r_p)`` 冒充 IR，那其实是夏普，
+    会系统性高估（漏掉了与基准共动的部分）。
+
+    跟踪误差为 0（策略与基准完全同步）时 IR 无定义，返回 0.0。
+    """
+    n = len(rets)
+    if n < 2 or len(benchmark_rets) != n:
         return 0.0
-    sd = pstdev(rets)
-    return (mean(rets) / sd * math.sqrt(TRADING_DAYS_PER_YEAR)) if sd else 0.0
+
+    excess = [rets[i] - benchmark_rets[i] for i in range(n)]
+    te = pstdev(excess)
+    if te <= 0:
+        return 0.0
+    return mean(excess) / te * math.sqrt(TRADING_DAYS_PER_YEAR)

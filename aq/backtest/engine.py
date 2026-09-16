@@ -27,6 +27,7 @@ from aq.core.models import (
     OrderType,
     Side,
 )
+from aq.data.index_store import IndexBarStore, IndexDataMissing
 from aq.data.provider import DataProvider, get_provider
 from aq.data.universe import UniverseSelector
 from aq.execution.sim_gateway import SimGateway
@@ -261,10 +262,18 @@ class BacktestEngine:
 
         # ------------------------------------------------------------------ 收尾
         self.gateway.persist()
+
+        # 基准对齐：把沪深300（或配置指定指数）的日收益按**同一交易日序列**
+        # 对齐到策略权益曲线上，供 alpha/beta/信息比率计算使用。
+        benchmark_rets, bench_note = self._benchmark_returns(equity_curve)
+        if bench_note:
+            print(f"[基准] {bench_note}")
+
         metrics = compute_metrics(
             equity_curve,
             initial_cash=self.cfg.backtest.initial_cash,
             fills=all_fills,
+            benchmark_rets=benchmark_rets,
         )
 
         return BacktestResult(
@@ -278,6 +287,57 @@ class BacktestEngine:
             config=self.cfg.model_dump(mode="json"),
             created_at=datetime.now(),
         )
+
+    # ------------------------------------------------------------------ 基准
+    def _benchmark_returns(
+        self, equity: list[EquityPoint]
+    ) -> tuple[list[float] | None, str]:
+        """取基准指数的日收益序列，按权益曲线的交易日逐日对齐。
+
+        返回 ``(rets, note)``；``rets`` 为 ``None`` 表示无基准（指标不计算）。
+        **对齐失败时返回 None 而非近似值** —— 错位的基准序列会算出
+        看起来正常的假 alpha，比没有更危险。
+        """
+        code = getattr(self.cfg.backtest, "benchmark", "") or ""
+        if not code:
+            return None, "未配置 benchmark，alpha/beta/信息比率不计算"
+
+        try:
+            store = IndexBarStore()
+            if not store.has(code):
+                return None, (
+                    f"基准 {code} 行情缺失（data_cache/index_bars/），"
+                    f"alpha/beta/信息比率不计算；"
+                    f"运行 python scripts/fetch_index_bars.py 可补齐"
+                )
+            idx = store.load(
+                code,
+                start=min(p.time for p in equity).date(),
+                end=max(p.time for p in equity).date(),
+            )
+        except (IndexDataMissing, KeyError, ValueError) as exc:
+            return None, f"基准 {code} 不可用（{exc}），alpha/beta/信息比率不计算"
+
+        # 权益曲线的每一天 → 该日基准收盘点位
+        by_date = {t.date(): float(c) for t, c in zip(idx["time"], idx["close"])}
+        dates = [p.time.date() for p in equity]
+
+        # 从第二天开始算收益（与 metrics 里 rets 的口径一致：n 个权益点 → n-1 个收益）
+        rets: list[float] = []
+        missing = 0
+        for i in range(1, len(dates)):
+            prev_c, cur_c = by_date.get(dates[i - 1]), by_date.get(dates[i])
+            if prev_c is None or cur_c is None or prev_c <= 0:
+                missing += 1
+                continue
+            rets.append(cur_c / prev_c - 1)
+
+        if missing:
+            return None, (
+                f"基准 {code} 有 {missing} 个交易日缺数据，无法逐日对齐，"
+                f"alpha/beta/信息比率不计算"
+            )
+        return rets, f"{code} {len(idx)} 行已对齐（{len(rets)} 个交易日）"
 
     @property
     def rejected_count(self) -> int:
