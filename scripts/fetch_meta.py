@@ -217,8 +217,24 @@ def fetch_stocks() -> pd.DataFrame | None:
         merged["is_st"] = merged.get("name", pd.Series(dtype=str)).astype(str).str.contains(
             "ST|退", na=False)
 
-    # 已落盘标记：回测只应对有数据的股票建模
-    merged["has_data"] = merged["symbol"].map(lambda s: (BARS / f"{s}.parquet").exists())
+    # 已落盘标记：回测只应对**确实有行情**的股票建模。
+    #
+    # ⚠️ 只查 `exists()` 是不够的：抓取失败会留下 0 行的 parquet，
+    # 文件在、数据无。历史上这个字段因此虚高/虚低过（北交所修复后
+    # 数据已补齐，但旧清单没更新，显示 344 只"无数据"而实际都有）。
+    # 这里改为**同时校验行数**，让标记与真实可用数据一致。
+    def _has_bars(sym: str) -> bool:
+        p = BARS / f"{sym}.parquet"
+        if not p.exists():
+            return False
+        try:
+            import pyarrow.parquet as pq
+
+            return int(pq.ParquetFile(p).metadata.num_rows) > 0
+        except Exception:  # noqa: BLE001
+            return False
+
+    merged["has_data"] = merged["symbol"].map(_has_bars)
 
     _atomic_parquet(merged, base_path)
     _log(f"  合并后 {len(merged)} 只 → {base_path.name} "
