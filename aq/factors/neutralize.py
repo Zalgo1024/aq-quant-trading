@@ -29,6 +29,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from aq.factors.vlib import STYLE_FACTORS
+
 
 def winsorize(s: pd.Series, p: float = 0.01) -> pd.Series:
     """对称截尾：把两端 p 分位以外的极值拉回分位点。"""
@@ -57,6 +59,7 @@ def neutralize(
     winsor: float = 0.01,
     standardize: bool = True,
     inplace: bool = False,
+    industry_only: list[str] | None = None,
 ) -> pd.DataFrame:
     """对因子做行业 + 市值中性化，返回带新列的 DataFrame。
 
@@ -68,7 +71,18 @@ def neutralize(
         回归前先截尾，防止极端值主导 β。
     standardize
         残差再做一次截面 z-score，便于后续加权合成。
+    industry_only
+        **只做行业中性化、跳过市值中性化**的因子名列表。
+
+        ⚠️ 规模因子（``ln_mktcap``）必须放进来。原因不是工程瑕疵而是数学必然：
+        中性化的第二步是「对 ln(mktcap) 做一元回归取残差」，而 ln_mktcap
+        对它自己回归的残差**恒等于 0** —— 市值中性化会把规模因子整个抹掉。
+
+        这不是 bug：市值本身就是风格因子，"剔除市值影响后的市值"没有意义。
+        同理，若将来加入纯风格因子（如 beta、纯行业暴露），也应放这里。
+        默认取 ``vlib.STYLE_FACTORS``，避免调用方忘传导致因子被静默抹平。
     """
+    industry_only = set(industry_only) if industry_only is not None else set(STYLE_FACTORS)
     out = df if inplace else df.copy()
 
     ind = out[industry_col].astype(str)
@@ -97,16 +111,21 @@ def neutralize(
         y_dm = y - y.groupby(grp_keys).transform("mean")
 
         # --- 第二步：FWL —— 对 ln(mktcap) 做一元回归 ---
-        x = lncap.where(has_cap)
-        x_dm = x - x.groupby(grp_keys).transform("mean")
+        if col in industry_only:
+            # 规模因子跳过这一步：ln_mktcap 对 ln(mktcap) 回归的残差恒为 0，
+            # 做了等于把它删掉。只保留行业中性化结果。
+            resid = y_dm
+        else:
+            x = lncap.where(has_cap)
+            x_dm = x - x.groupby(grp_keys).transform("mean")
 
-        num = (x_dm * y_dm).groupby(out[date_col]).transform("sum")
-        den = (x_dm * x_dm).groupby(out[date_col]).transform("sum")
-        beta = num / den.replace(0.0, np.nan)
+            num = (x_dm * y_dm).groupby(out[date_col]).transform("sum")
+            den = (x_dm * x_dm).groupby(out[date_col]).transform("sum")
+            beta = num / den.replace(0.0, np.nan)
 
-        resid = y_dm - beta * x_dm
-        # 缺市值的行：x_dm 为 NaN -> resid 为 NaN，回退成纯行业中性化结果
-        resid = resid.where(has_cap, y_dm)
+            resid = y_dm - beta * x_dm
+            # 缺市值的行：x_dm 为 NaN -> resid 为 NaN，回退成纯行业中性化结果
+            resid = resid.where(has_cap, y_dm)
         # 原始因子为 NaN 的行保持 NaN
         resid = resid.where(y.notna())
 

@@ -65,10 +65,14 @@ CSC_DIR = PROJECT_ROOT / "runtime" / "cscv"
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="CSCV + Deflated Sharpe 稳健性检验")
-    p.add_argument("--start", default="2021-01-01")
+    # 口径（2026-09-17 修正）：默认与因子面板对齐 = liquid 池 + 2019 起点。
+    # 旧默认是 hs300 池 + 2021-01-01，比面板少用了 35% 样本（1371 vs 1861 天），
+    # 且池子口径与所有结论（liquid）不一致。样本量与检验功效直接相关，故对齐。
+    # 旧结果保留在 runtime/cscv/{hs300_main,liquid_main}（2021 起点），未改动。
+    p.add_argument("--start", default="2019-01-01")
     p.add_argument("--end", default="2026-08-31")
     p.add_argument("--capital", type=float, default=1_000_000.0)
-    p.add_argument("--universe", default="hs300", choices=["hs300", "liquid", "all"])
+    p.add_argument("--universe", default="liquid", choices=["hs300", "liquid", "all"])
     p.add_argument("--variant", default="full_neu")
     p.add_argument("--tag", default="main", help="结果目录后缀，区分不同实验")
     p.add_argument("--ic-raw", default="",
@@ -376,6 +380,13 @@ def _print_dsr(best_label: str, rets: pd.Series, cfg_n: int, args) -> dict:
               f"{r['sr_threshold_annual']:>16.3f} {r['deflated_sharpe']:>9.3f} "
               f"{r['t_stat']:>9.3f}{flag}")
     print("  " + "-" * 76)
+    if args.n_trials <= 0:
+        # 默认 N = 配置个数，这是自由度的**下界**，容易被误读成"只试过这么几次"。
+        print(f"  ⚠️ 本次采用 N={n_trials}（= 本轮配置数）—— 这是自由度的**下界**，不是真实值。")
+        print(f"     它只统计了这一轮跑的 {n_trials} 个配置，不含此前已经扫过的维度：")
+        print(f"     hold_days / top_k / score_threshold / min_turnover / industry_max /")
+        print(f"     icir-ratio / shrink / cap ... 这些都在同一份样本上选过。")
+        print(f"     → 按真实研究自由度（100 量级）读上表对应行的 DSR 才诚实。")
     print("  读法：DSR > 0.95 才算'扣掉试错成本后仍然显著'；"
           "DSR 随 N 迅速塌陷 = 结论完全依赖于'没试过太多次'这个假设")
     return base
@@ -550,9 +561,16 @@ def main(argv: list[str] | None = None) -> int:
     hc = main_pbo.get("haircut")
     hc_s = (f"{hc*100:.1f}%" if hc is not None
             else "n/a（样本内夏普 ≤ 0，本来就没什么可缩水的）")
+    # ⚠️ PBO 的零假设基准**不是固定的 0.5**：它是候选集的函数。
+    # 候选越相似（ρ̄ 高、N_eff 低），基准越往上移；子期数 S 也会改变它。
+    # 用固定 0.5 做二元判断（"大于 0.5 = 过拟合"）已被 7.14.8 的标定实验推翻 ——
+    # 5 候选同质时实测基准 0.593、90% 区间宽 0.78，实测值落在区间内即"无法拒绝零假设"。
+    _rho = corr["mean_pairwise_corr"]
+    _neff = corr["n_eff"]
     lines = [
-        f"1. PBO = {main_pbo['pbo']:.3f}（零假设基准 0.5）→ "
-        f"{C.interpret_pbo(main_pbo['pbo'])}",
+        f"1. PBO = {main_pbo['pbo']:.3f}（S={main_pbo['n_subperiods']}）"
+        f"｜参考基准 0.5，但⚠️ 真实基准随候选集上移："
+        f"本次 ρ̄={_rho:.2f}、N_eff={_neff:.2f} → {C.interpret_pbo(main_pbo['pbo'])}",
         f"2. 挑参带来的期望缩水 haircut = {hc_s}",
         f"3. 最优配置 {best_label} 的 t 统计量 = {t:.3f}"
         f"{'  → 连显著不为 0 都谈不上' if abs(t) < 2 else '  → 显著'}",

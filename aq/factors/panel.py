@@ -32,6 +32,23 @@ from aq.factors.vlib import REQUIRES_SHARES, spec_names
 
 BARS_DIR = PROJECT_ROOT / "data_cache" / "bars"
 CACHE_DIR = PROJECT_ROOT / "data_cache" / "factors"
+# 历史估值（scripts/fetch_valuation.py 产出；东财 stock_value_em）
+VALUATION_DIR = PROJECT_ROOT / "data_cache" / "valuation"
+
+# 估值因子的**披露滞后**（自然日）。
+# PE/PB 的分母来自财报，而财报在报告期结束后才披露：
+#   年报 最迟 4/30、半年报 8/31、三季报 10/31、一季报 4/30
+# 东财 stock_value_em 大概率给的是"当时快照"（抽查 000001 时 PE 与 PB 的日变动
+# 逐位相等，说明区间内分母未更新），但样本不足以下定论。
+# 因此一律做保守滞后：宁可少用一点信息，也不能让未来数据漏进来。
+# ⚠️ 前视偏差会让因子 IC 虚高，是"回测好看、实盘归零"的典型来源。
+VAL_LAG_DAYS = {
+    "pe_ttm": 90,    # 净利润最敏感，滞后取最大
+    "pb": 60,        # 净资产变化慢，但仍需覆盖半年报滞后
+    "ps": 90,        # 同 pe（营收也是定期披露）
+}
+# 估值源列 -> 面板列名（供 vlib 的 k_bp/k_ep/k_sp 使用）
+VAL_COLS = ["pe_ttm", "pb", "ps"]
 
 # 需要读取的原始列
 RAW_COLS = [
@@ -148,6 +165,38 @@ class FactorPanelBuilder:
         # 但收益计算要跳过 —— 统一在后面用 mask 处理。
         return df
 
+    def _attach_valuation(self, symbol: str, df: pd.DataFrame) -> None:
+        """把历史估值（PE/PB/PS）按**披露滞后**对齐到日线，写入 df 同名列。
+
+        滞后实现：把估值日期整体后移 ``VAL_LAG_DAYS[col]`` 天再做 as-of 匹配，
+        于是 t 日只能匹配到 (t − lag) 及之前的记录 —— 这正是"当时能看到的"。
+
+        找不到估值文件（次新股 / 北交所）时静默留空：这些股票在 IC 检验里
+        会因样本不足被自动跳过，不该让整个面板构建失败。
+        """
+        p = VALUATION_DIR / f"{symbol}.parquet"
+        if not p.exists():
+            return
+        v = pd.read_parquet(p, columns=["date"] + VAL_COLS)
+        v["date"] = pd.to_datetime(v["date"], errors="coerce")
+        v = v.dropna(subset=["date"]).sort_values("date")
+        if v.empty:
+            return
+
+        base = pd.to_datetime(df["time"]).to_frame("time")
+        for col in VAL_COLS:
+            sub = v[["date", col]].dropna()
+            if sub.empty:
+                continue
+            sub = sub.assign(date=sub["date"] + pd.Timedelta(days=VAL_LAG_DAYS[col]))
+            m = pd.merge_asof(
+                base,
+                sub.rename(columns={"date": "time"}),
+                on="time",
+                direction="backward",
+            )
+            df[col] = m[col].to_numpy()
+
     def build_one(self, symbol: str) -> pd.DataFrame | None:
         """计算单只股票的完整面板片段。"""
         from aq.factors.vlib import compute_all
@@ -188,6 +237,21 @@ class FactorPanelBuilder:
             df["float_share"] = float(shares)
         elif "turn_rate_20" in cfg.factors:
             df["float_share"] = np.nan
+
+        # ---- 规模 / 估值因子的输入列（必须在 compute_all **之前**注入）----
+        # 面板长表自己的 mktcap 列是 compute_all 之后才拼上去的，
+        # vlib 的 k_ln_mktcap 看不到；估值列更是完全来自另一份数据源。
+        if "ln_mktcap" in cfg.factors:
+            _adjp = df["adj_factor"].astype("float64").replace(0.0, np.nan)
+            if "float_share" in df.columns:
+                df["mktcap"] = (
+                    df["close"].astype("float64") / _adjp
+                    * pd.to_numeric(df["float_share"], errors="coerce")
+                ).to_numpy()
+            else:
+                df["mktcap"] = np.nan
+        if any(f in cfg.factors for f in ("bp", "ep", "sp")):
+            self._attach_valuation(symbol, df)
 
         # ---- 因子（向量化，含 warmup 全段）----
         fac = compute_all(df, [f for f in cfg.factors])

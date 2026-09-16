@@ -271,6 +271,12 @@ def t_backtest() -> None:
     cfg.backtest.start = "2023-01-01"
     cfg.backtest.end = "2024-06-30"
     cfg.execution.persist_path = ""
+    # 冒烟测试只验证"链路跑通"，不是性能测试：主口径改成全市场流动性池后
+    # 候选有 3800+ 只，建一次因子面板要好几分钟，会把自检拖垮。
+    # 这里显式截断规模（仍走 all 路径，与生产口径一致，只是池子小）。
+    # 注：max_symbols 是按代码序截断的，有系统性偏置 —— 生产上保持 0（不截断），
+    # 仅在此处为提速而用，不影响"回测引擎能否跑完并真实建仓"这个断言。
+    cfg.universe.max_symbols = 300
 
     result = BacktestEngine(cfg).run()
     assert result.run_id, "no run_id"
@@ -337,7 +343,10 @@ def t_api() -> None:
     # 回测跑得完、曲线看着正常，但仓位恒为 0 —— 这条测试曾经就这样
     # "通过"了很久，因为它只检查 run_id 存在。单票上限 10% → 至少 10 只，
     # 取 20 留余量。
-    r = client.post("/api/backtest", json={"start": "2024-01-01", "end": "2024-09-30", "top_k": 20})
+    # max_symbols：全市场池 3800+ 只会把自检拖到几分钟，这里只验证链路。
+    # 断言重点是"真的建仓了"（见下方 avg_exposure），池子大小不影响该断言。
+    r = client.post("/api/backtest", json={"start": "2024-01-01", "end": "2024-09-30",
+                                           "top_k": 20, "max_symbols": 300})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["run_id"], "no run_id"

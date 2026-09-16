@@ -276,6 +276,69 @@ def k_turnover_rate(d: pd.DataFrame, n: int = 20) -> pd.Series:
     return (v / sh).rolling(n, min_periods=max(5, n // 2)).mean()
 
 
+# ---- 规模 / 估值（P2.5，2026-09-17 新增）----
+#
+# 这两个因子的共同点：都是**慢变量**（市值、净资产变化远慢于价量），
+# 换手率天生比量价因子低一个量级。这一点很关键 ——
+# 本项目最大的问题是"换手吃掉 alpha"（年换手 12 次 × 双边 25~50bps ≈ 3~6%/年，
+# 而实测 alpha 才 3.86%），加慢变量是直接打在瓶颈上，不是多凑几个因子。
+#
+# ⚠️ 两个必须知道的坑：
+# 1. **mktcap 由 panel 在调 compute_all 之前注入**（close_real × float_share）。
+#    面板长表里的 mktcap 列是**之后**才算的，vlib 拿不到 —— 别搞混。
+# 2. **市值因子不能再做市值中性化**：ln_mktcap 对 ln(mktcap) 回归的残差恒为 0，
+#    中性化会把它整个抹掉。因此规模因子只在 **raw 口径**下有定义，
+#    `neutralize()` 必须跳过它（见 neutralize.py 的 cap_neutralize_exclude）。
+#    —— 这不是 bug：市值本身就是风格因子，中性化掉就没有意义了。
+
+
+def k_ln_mktcap(d: pd.DataFrame) -> pd.Series:
+    """流通市值对数。
+
+    取对数是因为市值右偏严重（几十亿 ~ 上万亿跨 3 个数量级），
+    直接用原始值会让横截面 z-score 被少数巨头主导。
+    """
+    if "mktcap" not in d:
+        return pd.Series(np.full(len(d), np.nan))
+    cap = _s(d["mktcap"]).replace(0.0, np.nan)
+    return np.log(cap)
+
+
+def k_bp(d: pd.DataFrame) -> pd.Series:
+    """市净率倒数 BP = 1 / PB（账面市值比）。
+
+    PB 由 panel 注入（``pb`` 列，来自 data_cache/valuation）。
+    用倒数而非 PB 本身：PB 越低越便宜，取倒数后变成"越大越好"，
+    与其他因子同向，且避免 PB→0 时的爆炸（改到分母上更稳）。
+    """
+    if "pb" not in d:
+        return pd.Series(np.full(len(d), np.nan))
+    pb = _s(d["pb"]).replace(0.0, np.nan)
+    return 1.0 / pb
+
+
+def k_ep(d: pd.DataFrame) -> pd.Series:
+    """市盈率倒数 EP = 1 / PE(TTM)（盈利收益率）。
+
+    ⚠️ 亏损股 PE 为负 → EP 为负，这在横截面上是**有效信息**（不代表缺失），
+    不要当 NaN 丢掉；但 PE 极接近 0 会让 EP 爆炸，故对 |PE| 设下限。
+    """
+    if "pe_ttm" not in d:
+        return pd.Series(np.full(len(d), np.nan))
+    pe = _s(d["pe_ttm"])
+    # |PE| < 0.5 通常是数据异常（微利股），截掉以免 EP 爆到 ±∞
+    pe = pe.where(pe.abs() >= 0.5)
+    return 1.0 / pe.replace(0.0, np.nan)
+
+
+def k_sp(d: pd.DataFrame) -> pd.Series:
+    """市销率倒数 SP = 1 / PS。PS 比 PE 稳定（营收不会像利润那样变负）。"""
+    if "ps" not in d:
+        return pd.Series(np.full(len(d), np.nan))
+    ps = _s(d["ps"]).replace(0.0, np.nan)
+    return 1.0 / ps
+
+
 # ---------------------------------------------------------------------------
 # 因子规格表 —— 唯一事实来源
 # ---------------------------------------------------------------------------
@@ -386,6 +449,18 @@ def _specs() -> list[FactorSpec]:
         S("gap", lambda d: k_gap(d), 1, "结构", "跳空幅度"),
         # 日内收益：收盘强势 -> 次日反转，故 -1
         S("intraday_ret", lambda d: k_intraday_ret(d), -1, "结构", "日内收益"),
+
+        # ---- 规模 / 估值（P2.5，2026-09-17 新增）----
+        # ⚠️ 方向是**先验**，尚未经本项目 A 股实测校准 —— 本表原有 27 个因子
+        #    初版照搬教科书时错了 13 个，所以这几个新因子的方向同样不可信，
+        #    必须先跑一次 IC 实测（scripts/neutral_diag.py --method ic）再定。
+        #    在实测之前，它们在组合里的权重应当视为"未定"。
+        # -1：A 股长期存在小市值效应（规模溢价），市值越小收益越高
+        S("ln_mktcap", lambda d: k_ln_mktcap(d), -1, "规模", "流通市值对数"),
+        # +1：BP/EP/SP 都是"收益率"口径（越大 = 越便宜 = 越看好）
+        S("bp", lambda d: k_bp(d), +1, "估值", "市净率倒数"),
+        S("ep", lambda d: k_ep(d), +1, "估值", "市盈率倒数(TTM)"),
+        S("sp", lambda d: k_sp(d), +1, "估值", "市销率倒数"),
     ]
 
 
@@ -397,6 +472,12 @@ SPEC_BY_NAME: dict[str, FactorSpec] = {s.name: s for s in FACTOR_SPECS}
 # 需要外部数据的因子（股本等），面板里股本缺失时会整体为 NaN，
 # IC 检验时会自动跳过有效样本不足的因子。
 REQUIRES_SHARES = {"turn_rate_20"}
+
+# 风格因子：**不做市值中性化**（见 neutralize.neutralize 的 industry_only）。
+# ln_mktcap 对 ln(mktcap) 回归的残差恒为 0，中性化会把它整个抹掉。
+# 放在这里（而不是让调用方各自传参）是为了避免"忘了传"导致的静默失效 ——
+# 那种 bug 的表现是因子 IC 突然变成 0，很容易被误读成"市值因子无效"。
+STYLE_FACTORS = {"ln_mktcap"}
 
 
 def spec_names() -> list[str]:

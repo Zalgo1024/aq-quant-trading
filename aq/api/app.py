@@ -435,6 +435,11 @@ class BacktestRequest(BaseModel):
     top_k: int | None = None
     initial_cash: float | None = None
     mode: str | None = None
+    # 股票池规模上限。None = 沿用配置（生产默认 0，即不截断）。
+    # 存在的理由：全市场流动性池有 3800+ 只候选，建一次因子面板要几分钟，
+    # 前端点一次"跑回测"就卡死。给调用方一个显式截断的口子，
+    # 用于快速预览 / 自检。（⚠️ 截断按代码序，有系统性偏置，不能用于结论）
+    max_symbols: int | None = None
 
 
 @app.post("/api/backtest")
@@ -450,6 +455,8 @@ def run_backtest_api(req: BacktestRequest) -> dict:
         overrides.setdefault("backtest", {})
         overrides["backtest"]["start"] = req.start
         overrides["backtest"]["end"] = req.end
+    if req.max_symbols:
+        overrides["universe"] = {"max_symbols": req.max_symbols}
 
     cfg = load_settings(mode=req.mode or "backtest", **overrides)
     result = BacktestEngine(cfg).run()
