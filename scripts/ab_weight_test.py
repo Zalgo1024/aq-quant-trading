@@ -77,6 +77,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "用于找出成本与信号衰减之间的最优点")
     p.add_argument("--hold-days", default="1,5,10,20",
                    help="--hold-scan 的间隔列表（交易日），逗号分隔")
+    p.add_argument("--force-panel", action="store_true",
+                   help="强制重建因子面板缓存。补过股本/行情等底层数据后必须加，"
+                        "否则面板一直吃旧缓存，改了数据也看不出变化")
     p.add_argument("--weights", default="both",
                    choices=["both", "prior", "ic"],
                    help="跑哪些权重方案。--hold-scan 时建议用 ic（更省时间）")
@@ -140,7 +143,7 @@ def _run_one(cfg, label: str, **over) -> dict:
     m = res.metrics
     get = lambda k, d=None: getattr(m, k, d)  # noqa: E731
 
-    return {
+    row = {
         "label": label,
         "total_return": get("total_return"),
         "annual_return": get("annual_return"),
@@ -159,9 +162,16 @@ def _run_one(cfg, label: str, **over) -> dict:
         "universe": cfg.universe.index,
         "rebalance_days": getattr(cfg.backtest, "rebalance_days", None),
     }
+    # 仓位诊断：低仓位会把 beta 和收益一起压低，必须和绩效并列输出，
+    # 否则很容易把"没买进去"误读成"选股不行"。
+    diag = getattr(res, "diagnostics", None) or {}
+    for k in ("avg_exposure", "median_exposure", "days_over_90pct",
+              "n_days", "avg_holdings", "max_holdings"):
+        row[k] = diag.get(k)
+    return row
 
 
-def _hold_scan(cfg, args, hold_days: list[int]) -> list[dict]:
+def _hold_scan(cfg, args, hold_days: list[int], out_path=None) -> list[dict]:
     """调仓频率扫描：对每个间隔各跑一组，输出成本/信号衰减的权衡表。
 
     为什么这一步是关键
@@ -169,6 +179,12 @@ def _hold_scan(cfg, args, hold_days: list[int]) -> list[dict]:
     研究口径（``attribution_test.py --hold-scan``）已证明日频调仓的成本
     拖累高达 18.43pp/年，10 日调仓最优。但那是**逐日累乘的近似模型**；
     引擎这边的多日调仓能力**刚接进来**，必须在完整撮合 + 真实成本下重验。
+
+    为什么增量落盘
+    --------------
+    单次要跑 5~20 分钟，四个间隔加起来半小时以上。**每跑完一组就写盘**，
+    中途被打断也不至于全部重来（2026-09-16 就遇到过：前三组白跑了，
+    日志停在 [4/4] 但没有任何结果文件）。
     """
     rows: list[dict] = []
     modes = (["prior", "ic"] if args.weights == "both" else [args.weights])
@@ -181,8 +197,27 @@ def _hold_scan(cfg, args, hold_days: list[int]) -> list[dict]:
             label = f"h={h:>2d}d_{src}"
             print(f"\n[{n}/{total}] 调仓间隔 {h} 交易日 | 权重 {src}")
             r = _run_one(cfg, label, bt_rebalance_days=h)
+            # 面板只在**第一次**强制重建：--force-panel 是"底层数据变了"的信号，
+            # 不是"每次回测都要重算"。重算一次后缓存已是最新的，
+            # 后面三次照常复用即可（否则扫描 N 个间隔就白重建 N 次面板）。
+            if getattr(cfg.backtest, "panel_force", False):
+                cfg.backtest.panel_force = False
             r["hold_days"] = h
             rows.append(r)
+            if out_path is not None:
+                # 增量落盘：先写部分结果，中断也留得下
+                try:
+                    out_path.write_text(
+                        json.dumps({"partial": True,
+                                    "generated_at": datetime.now().isoformat(timespec="seconds"),
+                                    "universe": args.universe,
+                                    "mode": "hold_scan",
+                                    "hold_days": hold_days,
+                                    "rows": rows},
+                                   ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+                except Exception as e:  # noqa: BLE001
+                    print(f"       （增量落盘失败：{e}）")
     return rows
 
 
@@ -206,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg.backtest.start = args.start
     cfg.backtest.end = args.end
     cfg.backtest.initial_cash = args.capital
+    cfg.backtest.panel_force = bool(getattr(args, "force_panel", False))
 
     # 池子口径
     uni_note = _apply_universe(cfg, args.universe)
@@ -231,20 +267,27 @@ def main(argv: list[str] | None = None) -> int:
     if args.hold_scan:
         hold_days = [int(x) for x in str(args.hold_days).split(",") if x.strip()]
         hold_days = sorted({h for h in hold_days if h >= 1})
-        rows = _hold_scan(cfg, args, hold_days)
+        suffix = f"_{args.tag}" if args.tag else ""
+        scan_path = OUT_DIR / f"ab_holdscan_{args.universe}{suffix}.json"
+        rows = _hold_scan(cfg, args, hold_days, out_path=scan_path)
 
         df = pd.DataFrame(rows)
-        show = df[["hold_days", "weight_source", "total_return", "annual_return",
-                   "sharpe", "max_drawdown", "alpha", "beta",
-                   "information_ratio", "n_trades", "elapsed_sec"]].copy()
-        for c in ("total_return", "annual_return", "max_drawdown", "alpha"):
-            if show[c].dtype.kind == "f":
+        cols = ["hold_days", "weight_source", "total_return", "annual_return",
+                "sharpe", "max_drawdown", "alpha", "beta",
+                "information_ratio", "n_trades"]
+        # 仓位诊断列：有才有（老引擎跑出来的结果没有）
+        if "avg_exposure" in df.columns and df["avg_exposure"].notna().any():
+            cols += ["avg_exposure", "avg_holdings", "days_over_90pct"]
+        cols.append("elapsed_sec")
+        show = df[cols].copy()
+        for c in ("total_return", "annual_return", "max_drawdown", "alpha", "avg_exposure"):
+            if c in show.columns and show[c].dtype.kind == "f":
                 show[c] = (show[c] * 100).round(2)
 
         print("\n" + "=" * 118)
         print(f"调仓频率扫描（{args.start} ~ {args.end} | 池子 {args.universe}）")
         print("=" * 118)
-        print("  收益/alpha 单位：%；alpha 为年化超额")
+        print("  收益/alpha/仓位 单位：%；alpha 为年化超额")
         print(show.to_string(index=False))
 
         # 最优间隔：以夏普为主口径（收益与风险兼顾），并列最大回撤
@@ -268,8 +311,7 @@ def main(argv: list[str] | None = None) -> int:
             "hold_days": hold_days,
             "rows": rows,
         }
-        suffix = f"_{args.tag}" if args.tag else ""
-        out_path = OUT_DIR / f"ab_holdscan_{args.universe}{suffix}.json"
+        out_path = scan_path
         out_path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"\n[落盘] {out_path}")
         return 0

@@ -79,6 +79,11 @@ class BacktestConfig(BaseModel):
     rebalance_days: int | None = None
     initial_cash: float = 1_000_000.0
     benchmark: str = "000300"
+    # 强制重建因子面板缓存。默认 False —— 面板按 (universe, start, end, factors)
+    # 哈希缓存，换池子或换区间会自动换文件名。**只有在底层数据变了**
+    # （典型如补了股本 → mktcap 变 → 中性化结果变）才需要置 True，
+    # 否则会一直吃到旧缓存，看起来"改了数据没生效"。
+    panel_force: bool = False
     cost: CostConfig = Field(default_factory=CostConfig)
 
 

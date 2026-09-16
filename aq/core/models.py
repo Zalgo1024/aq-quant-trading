@@ -329,3 +329,8 @@ class BacktestResult(BaseModel):
     trades: list[Fill] = Field(default_factory=list)
     config: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime | None = None
+    # 回测过程诊断（非绩效指标）：平均持仓数、平均仓位、满仓天数等。
+    # 单独放而不是塞进 metrics，是因为这些不是"策略好不好"的度量，
+    # 而是"回测有没有按预期执行"的度量 —— 低仓位会同时压低 beta 和收益，
+    # 不盯住它会把工程 bug 误读成策略特性。
+    diagnostics: dict[str, Any] = Field(default_factory=dict)

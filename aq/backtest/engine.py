@@ -187,7 +187,11 @@ class BacktestEngine:
                 factors=list(self.library.names),
                 symbols=syms,
             )
-            panel = FactorPanelBuilder(pcfg).build()
+            # panel_force：底层数据变了（补股本 → mktcap → 中性化）才需要，
+            # 否则永远吃旧缓存，"改了数据没生效"会非常难查。
+            panel = FactorPanelBuilder(pcfg).build(
+                force=bool(getattr(self.cfg.backtest, "panel_force", False))
+            )
         except Exception as exc:  # noqa: BLE001
             print(f"[警告] 因子面板构建失败（{type(exc).__name__} {exc}），"
                   f"退化为逐日标量计算（较慢）")
@@ -243,6 +247,9 @@ class BacktestEngine:
         equity_curve: list[EquityPoint] = []
         pending_orders: list[Order] = []
         all_fills = []
+        # 暴露度诊断序列（见第 5 步的说明）
+        self._expo_series: list[float] = []
+        self._nhold_series: list[int] = []
 
         for i, d in enumerate(dates):
             ds = d.isoformat()
@@ -306,7 +313,18 @@ class BacktestEngine:
                     # 因子打分 → 组合 → 订单
                     preds = self._score_at(ds)
                     self._last_predictions = preds
-                    prices = {s: b.close for s, b in day_bars.items()}
+                    # ⚠️ 必须用**真实价** close_raw，不能用后复权 close。
+                    #
+                    # 账户的现金/成本/市值都在真实价尺度上结算（sim_gateway
+                    # 用 close_raw），而组合构建用后复权价算手数 —— 两者量纲
+                    # 不一致：后复权价因多年分红送转被放大到几百~上万
+                    # （hs300 里最高 13932 元，17.5% 的股票 > 500 元），
+                    # 于是"5% 仓位 = 5 万元"除以虚高价格后**连 1 手都买不到**，
+                    # 这些股票被静默跳过。
+                    # 实测后果：平均仓位只有 **34.8%**，1372 天里没有一天
+                    # 超过 90% —— beta 被压到 0.076~0.274（beta/仓位≈0.79，
+                    # 说明低 beta 主要来自低仓位，不是选股）。
+                    prices = {s: b.close_raw for s, b in day_bars.items()}
                     orders = self.portfolio.construct(preds, self.gateway.account, prices)
 
                     # 组合级风控
@@ -323,7 +341,7 @@ class BacktestEngine:
                     submitted = self.gateway.submit_order(o)
                     pending_orders.append(submitted)
 
-            # ---------- 5) 记录权益 ----------
+            # ---------- 5) 记录权益 + 仓位诊断 ----------
             acct = self.gateway.account
             equity_curve.append(
                 EquityPoint(
@@ -331,9 +349,25 @@ class BacktestEngine:
                     equity=round(acct.total_asset, 2),
                 )
             )
+            # 暴露度诊断：低仓位会把 beta 和收益**一起**压低，看上去像
+            # "策略选股不行"，实际可能是"仓位根本没打满"。2026-09-16 就靠
+            # 这个指标抓出了后复权价/真实价量纲不一致的 bug（仓位仅 34.8%，
+            # 1372 天里没有一天超过 90%）。所以必须每日记录，不能只在收尾算。
+            try:
+                pos = acct.positions
+                pos = pos.values() if isinstance(pos, dict) else pos
+                mv = sum(p.qty * p.last_price for p in pos if p.qty > 0)
+                n_hold = sum(1 for p in pos if p.qty > 0)
+                ta = acct.total_asset
+                self._expo_series.append(mv / ta if ta > 0 else 0.0)
+                self._nhold_series.append(n_hold)
+            except Exception:  # noqa: BLE001
+                pass
 
         # ------------------------------------------------------------------ 收尾
         self.gateway.persist()
+
+        self._print_exposure()
 
         if self._pool_growth:
             n_new = sum(g[1] for g in self._pool_growth)
@@ -367,7 +401,46 @@ class BacktestEngine:
             trades=all_fills,
             config=self.cfg.model_dump(mode="json"),
             created_at=datetime.now(),
+            diagnostics=self._exposure_stats(),
         )
+
+    # ------------------------------------------------------------------ 仓位诊断
+    def _exposure_stats(self) -> dict:
+        """汇总每日暴露度，供上层判断"回测有没有按预期执行"。
+
+        判读口径
+        --------
+        - ``avg_exposure`` 长期显著低于目标仓位 → 大概率是**工程问题**
+          （买不进、被风控拒、量纲不一致），不是策略特性。
+        - ``beta / avg_exposure ≈ 1`` → 低 beta 主要来自低仓位，
+          而不是选股能力差。
+        """
+        e = self._expo_series
+        if not e:
+            return {}
+        n = len(e)
+        return {
+            "avg_exposure": round(sum(e) / n, 4),
+            "median_exposure": round(sorted(e)[n // 2], 4),
+            "min_exposure": round(min(e), 4),
+            "max_exposure": round(max(e), 4),
+            "days_over_90pct": sum(1 for x in e if x > 0.9),
+            "n_days": n,
+            "avg_holdings": round(sum(self._nhold_series) / n, 2) if self._nhold_series else 0,
+            "max_holdings": max(self._nhold_series) if self._nhold_series else 0,
+        }
+
+    def _print_exposure(self) -> None:
+        s = self._exposure_stats()
+        if not s:
+            return
+        print(f"[仓位] 平均 {s['avg_exposure']*100:.1f}% | 中位 "
+              f"{s['median_exposure']*100:.1f}% | 满仓(>90%) "
+              f"{s['days_over_90pct']}/{s['n_days']} 天 | 平均持仓 "
+              f"{s['avg_holdings']} 只（峰值 {s['max_holdings']}）")
+        if s["avg_exposure"] < 0.6:
+            print("       ⚠️ 平均仓位偏低 —— 先排查工程问题（价格量纲/最小手数/风控），"
+                  "不要把低 beta 当成选股能力")
 
     # ------------------------------------------------------------------ 调仓周期
     def _pool_refresh_dates(self) -> set[str]:

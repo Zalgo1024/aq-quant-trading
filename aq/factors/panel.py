@@ -318,7 +318,13 @@ class FactorPanelBuilder:
 
         try:
             for i, sym in enumerate(syms, 1):
-                cached = self._load_part(sym)
+                # ⚠️ force 必须**同时**绕过单股票缓存，否则是假重建。
+                # 曾经踩过：补了沪市股本（覆盖率 58% → 98.6%）后跑 --force，
+                # 结果 mktcap 一点没变 —— 因为 mktcap 是在 build_one 里算好
+                # 存进单股票 parquet 的，整表缓存虽然被 force 跳过了，
+                # 每个股票还是从旧零件里读，等于什么都没重算。
+                # 这类"你以为重建了其实没有"的坑，比不重建更难发现。
+                cached = None if force else self._load_part(sym)
                 if cached is not None:
                     # 缓存存的是全区间，按本次 start/end 切片
                     sel = cached
@@ -357,7 +363,11 @@ class FactorPanelBuilder:
                 writer.close()
 
         if n_cached:
-            print(f"[面板] 命中单股票缓存 {n_cached}/{len(syms)} 只")
+            print(f"[面板] 命中单股票缓存 {n_cached}/{len(syms)} 只，"
+                  f"重算 {len(syms)-n_cached} 只")
+        else:
+            print(f"[面板] 全部 {len(syms)} 只重算（未命中单股票缓存"
+                  f"{'，因 --force' if force else ''}）")
 
         if n_rows == 0:
             raise RuntimeError("面板为空：请检查 bars 目录与 start/end 区间")
