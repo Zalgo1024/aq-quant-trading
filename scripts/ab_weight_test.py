@@ -69,6 +69,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "liquid/all=全市场流动性池(研究口径)")
     p.add_argument("--tag", default="",
                    help="结果文件后缀标记，避免不同口径互相覆盖")
+    p.add_argument("--rebalance-days", type=int, default=None,
+                   help="调仓间隔（交易日）。不传则用配置里的 backtest.freq "
+                        "（默认 1d = 每日调仓）")
+    p.add_argument("--hold-scan", action="store_true",
+                   help="调仓频率扫描：对 --hold-days 里每个间隔各跑一组 A/B，"
+                        "用于找出成本与信号衰减之间的最优点")
+    p.add_argument("--hold-days", default="1,5,10,20",
+                   help="--hold-scan 的间隔列表（交易日），逗号分隔")
+    p.add_argument("--weights", default="both",
+                   choices=["both", "prior", "ic"],
+                   help="跑哪些权重方案。--hold-scan 时建议用 ic（更省时间）")
     return p.parse_args(argv)
 
 
@@ -104,12 +115,24 @@ def _apply_universe(cfg, universe: str) -> str:
             "近 20 日日均成交额 ≥ 2e7，不限规模）")
 
 
+def _f(v):
+    """尽力转 float，失败给 nan（用于比较与格式化）。"""
+    try:
+        return float(v)
+    except Exception:  # noqa: BLE001
+        return float("nan")
+
+
 def _run_one(cfg, label: str, **over) -> dict:
     """跑一次回测，返回指标字典。"""
     from aq.backtest.engine import BacktestEngine
 
     for k, v in over.items():
-        setattr(cfg.model, k, v)
+        if k.startswith("bt_"):
+            # bt_* 前缀 → 写进 cfg.backtest（如 bt_rebalance_days）
+            setattr(cfg.backtest, k[3:], v)
+        else:
+            setattr(cfg.model, k, v)
     t0 = time.time()
     res = BacktestEngine(cfg).run()
     el = time.time() - t0
@@ -134,7 +157,33 @@ def _run_one(cfg, label: str, **over) -> dict:
         "weight_source": cfg.model.weight_source,
         "ic_weight_mode": cfg.model.ic_weight_mode,
         "universe": cfg.universe.index,
+        "rebalance_days": getattr(cfg.backtest, "rebalance_days", None),
     }
+
+
+def _hold_scan(cfg, args, hold_days: list[int]) -> list[dict]:
+    """调仓频率扫描：对每个间隔各跑一组，输出成本/信号衰减的权衡表。
+
+    为什么这一步是关键
+    ------------------
+    研究口径（``attribution_test.py --hold-scan``）已证明日频调仓的成本
+    拖累高达 18.43pp/年，10 日调仓最优。但那是**逐日累乘的近似模型**；
+    引擎这边的多日调仓能力**刚接进来**，必须在完整撮合 + 真实成本下重验。
+    """
+    rows: list[dict] = []
+    modes = (["prior", "ic"] if args.weights == "both" else [args.weights])
+    total = len(hold_days) * len(modes)
+    n = 0
+    for h in hold_days:
+        for src in modes:
+            n += 1
+            cfg.model.weight_source = src
+            label = f"h={h:>2d}d_{src}"
+            print(f"\n[{n}/{total}] 调仓间隔 {h} 交易日 | 权重 {src}")
+            r = _run_one(cfg, label, bt_rebalance_days=h)
+            r["hold_days"] = h
+            rows.append(r)
+    return rows
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -178,15 +227,67 @@ def main(argv: list[str] | None = None) -> int:
     print(f"    Σ|w| = {sum(abs(x) for x in w.values()):.4f}")
     n_active = len(scorer.active_factors())
 
-    # ---- B：IC 自动定权 ----
+    # ---- 调仓频率扫描模式 ----
+    if args.hold_scan:
+        hold_days = [int(x) for x in str(args.hold_days).split(",") if x.strip()]
+        hold_days = sorted({h for h in hold_days if h >= 1})
+        rows = _hold_scan(cfg, args, hold_days)
+
+        df = pd.DataFrame(rows)
+        show = df[["hold_days", "weight_source", "total_return", "annual_return",
+                   "sharpe", "max_drawdown", "alpha", "beta",
+                   "information_ratio", "n_trades", "elapsed_sec"]].copy()
+        for c in ("total_return", "annual_return", "max_drawdown", "alpha"):
+            if show[c].dtype.kind == "f":
+                show[c] = (show[c] * 100).round(2)
+
+        print("\n" + "=" * 118)
+        print(f"调仓频率扫描（{args.start} ~ {args.end} | 池子 {args.universe}）")
+        print("=" * 118)
+        print("  收益/alpha 单位：%；alpha 为年化超额")
+        print(show.to_string(index=False))
+
+        # 最优间隔：以夏普为主口径（收益与风险兼顾），并列最大回撤
+        for src in sorted({r["weight_source"] for r in rows}):
+            sub = [r for r in rows if r["weight_source"] == src]
+            best = max(sub, key=lambda r: _f(r["sharpe"]))
+            print(f"\n[{src}] 最优调仓间隔 = {best['hold_days']} 交易日"
+                  f"（夏普 {_f(best['sharpe']):.3f}、收益 "
+                  f"{_f(best['total_return'])*100:.2f}%、回撤 "
+                  f"{_f(best['max_drawdown'])*100:.2f}%）")
+
+        out = {
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "period": {"start": args.start, "end": args.end},
+            "capital": args.capital,
+            "universe": args.universe,
+            "universe_note": uni_note,
+            "benchmark": getattr(cfg.backtest, "benchmark", None),
+            "weight_basis": str(vdir.relative_to(PROJECT_ROOT)),
+            "mode": "hold_scan",
+            "hold_days": hold_days,
+            "rows": rows,
+        }
+        suffix = f"_{args.tag}" if args.tag else ""
+        out_path = OUT_DIR / f"ab_holdscan_{args.universe}{suffix}.json"
+        out_path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"\n[落盘] {out_path}")
+        return 0
+
+    # ---- 单次 A/B：B IC 自动定权 / A 先验权重 ----
     print("\n" + "=" * 118)
     print("开始 A/B 对照回测")
     print("=" * 118)
-    res_b = _run_one(cfg, "B_ic_weight")
+    over = {}
+    if args.rebalance_days:
+        over["bt_rebalance_days"] = args.rebalance_days
+        print(f"[调仓] 间隔 {args.rebalance_days} 交易日"
+              f"（覆盖配置里的 backtest.freq）")
 
-    # ---- A：先验权重（同区间）----
+    res_b = _run_one(cfg, "B_ic_weight", **over)
+
     cfg.model.weight_source = "prior"
-    res_a = _run_one(cfg, "A_prior_weight")
+    res_a = _run_one(cfg, "A_prior_weight", **over)
 
     rows = [res_a, res_b]
     df = pd.DataFrame(rows)
@@ -202,12 +303,6 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 118)
     print("  收益/回撤单位：%；alpha 为年化超额；无基准时 alpha/beta/IR 为 None")
     print(show.to_string(index=False))
-
-    def _f(v):
-        try:
-            return float(v)
-        except Exception:  # noqa: BLE001
-            return float("nan")
 
     d_ret = _f(res_b["total_return"]) - _f(res_a["total_return"])
     d_shp = _f(res_b["sharpe"]) - _f(res_a["sharpe"])

@@ -127,7 +127,10 @@ class BacktestEngine:
         # 落盘 12 份碎片 parquet（实测 266KB ~ 4.5MB 各一份），既慢又脏，
         # 且每份的 cache key 都不同、永远无法复用。
         # 一次算 300 只只需 ~4s（见单股票增量缓存），代价可以忽略。
-        self._pending_growth: dict[str, list[str]] = {}
+        #
+        # 注意 ``_growth_symbols`` **必须无条件初始化**：非指数池（liquid/all）
+        # 没有 ``_pool_refresh``，若只在有刷新时赋值，后面引用会 AttributeError。
+        self._growth_symbols: list[str] = []
         if self._pool_refresh:
             all_syms = set(self.symbols)
             for p in sorted(self._pool_refresh):
@@ -141,8 +144,6 @@ class BacktestEngine:
                 print(f"股票池：逐期入池预备 {len(extra)} 只"
                       f"（{len(self._pool_refresh)} 个调整时点，期末目标 "
                       f"{len(all_syms)} 只）")
-            else:
-                self._growth_symbols = []
 
         all_dates: set[date] = set()
         load_syms = self.symbols + list(self._growth_symbols)
