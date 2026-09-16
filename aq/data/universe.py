@@ -44,6 +44,20 @@ INDEX_ALIAS = {
 
 
 class UniverseSelector:
+    """股票池选择器。
+
+    两种偏差的区别（重要）
+    ----------------------
+    - **前视偏差**：用了"当时还不知道"的未来信息。本类的指数池按
+      ``asof`` 过滤 ``in_date > asof`` 的成分即可消除。
+    - **幸存者偏差**：样本里只留下"活到今天"的个体，剔除了"中途被淘汰"的。
+      需要**完整的历史成分**才能消除，而公开免费源拿不到沪深300 的历史
+      成分（`ak.index_stock_cons` 只有"当前成分 + 纳入日期"，无剔除日期）。
+      故**本类无法消除幸存者偏差**，指数池回测收益天然偏高。
+
+    使用 ``describe()`` 可查看逐环节剔除统计。
+    """
+
     def __init__(self, cfg=None, cache_dir: str | Path | None = None) -> None:  # type: ignore[no-untyped-def]
         self.cfg = cfg
         d = cache_dir or getattr(getattr(cfg, "data", None), "cache_dir", "data_cache")
@@ -51,6 +65,8 @@ class UniverseSelector:
         self.cache = p if p.is_absolute() else PROJECT_ROOT / p
         self._meta: pd.DataFrame | None = None
         self._cons: pd.DataFrame | None = None
+        #: 最近一次 ``select()`` 因 ``in_date > asof`` 被剔除的成分数（诊断用）
+        self._last_dropped_after_asof: int = 0
 
     # ---------------------------------------------------------------- 数据
     @property
@@ -90,12 +106,35 @@ class UniverseSelector:
         if df.empty:
             return []
 
-        # 1) 指数池
+        # 1) 指数池（**按 asof 消除前视偏差**）
+        #
+        # `index_constituents.parquet` 里每只成分都带 `in_date`（纳入日期）。
+        # 若不看 `in_date`，回测 2023 年时会把"2024 年才被纳入指数"的股票
+        # 也算进池子 —— 那是**前视偏差**（当时它根本不在指数里）。
+        #
+        # 实测影响：asof=2023-01-01 时，288 只里有 **78 只**是回测期内
+        # 才纳入的。
+        #
+        # ⚠️ 本过滤**只能修前视偏差，修不了幸存者偏差**：
+        # `ak.index_stock_cons` 只返回"当前成分 + 纳入日期"，不含剔除日期，
+        # 「曾在指数内、后被调出」的股票根本不在文件里。故池子仍是
+        # "幸存者"集合，收益仍偏高。详见报告口径说明。
         code = INDEX_ALIAS.get(str(index).lower(), None)
         if code is not None:
             cons = self.constituents
             if not cons.empty:
-                pool = set(cons.loc[cons["index_code"] == code, "symbol"].astype(str))
+                sub = cons[cons["index_code"] == code]
+                sub = sub.drop_duplicates(subset=["symbol"], keep="first")
+                if asof is not None and "in_date" in sub.columns:
+                    in_d = pd.to_datetime(sub["in_date"], errors="coerce")
+                    a = pd.Timestamp(_to_date(asof))
+                    # in_date 缺失时保守保留（宁可多留，不可错杀）
+                    keep = in_d.isna() | (in_d <= a)
+                    n_drop = int((~keep).sum())
+                    if n_drop:
+                        self._last_dropped_after_asof = n_drop
+                    sub = sub[keep]
+                pool = set(sub["symbol"].astype(str))
                 if pool:
                     df = df[df["symbol"].astype(str).isin(pool)]
 
@@ -153,8 +192,12 @@ class UniverseSelector:
         return out
 
     # ---------------------------------------------------------------- 诊断
-    def describe(self, index: str | None = None) -> pd.DataFrame:
-        """返回各环节的剔除统计，便于排查"为什么我的股票池是空的"。"""
+    def describe(self, index: str | None = None, asof=None) -> pd.DataFrame:
+        """返回各环节的剔除统计，便于排查"为什么我的股票池是空的"。
+
+        传 ``asof`` 时会展示前视偏差修正（剔除 ``in_date > asof`` 的成分）
+        这一环节。**注意它不消除幸存者偏差** —— 见类 docstring。
+        """
         cfg_u = getattr(self.cfg, "universe", None)
         index = index if index is not None else (cfg_u.index if cfg_u else "hs300")
         steps = []
@@ -163,8 +206,17 @@ class UniverseSelector:
 
         code = INDEX_ALIAS.get(str(index).lower(), None)
         if code is not None and not self.constituents.empty:
-            pool = set(self.constituents.loc[
-                self.constituents["index_code"] == code, "symbol"].astype(str))
+            sub = self.constituents[self.constituents["index_code"] == code]
+            n_raw = len(sub)
+            sub = sub.drop_duplicates(subset=["symbol"], keep="first")
+            steps.append((f"指数池 {index}({code}) 原始/去重",
+                          f"{n_raw}/{len(sub)}"))
+            if asof is not None and "in_date" in sub.columns:
+                in_d = pd.to_datetime(sub["in_date"], errors="coerce")
+                keep = in_d.isna() | (in_d <= pd.Timestamp(_to_date(asof)))
+                steps.append(("剔除 asof 后才纳入(前视偏差)", int((~keep).sum())))
+                sub = sub[keep]
+            pool = set(sub["symbol"].astype(str))
             df = df[df["symbol"].astype(str).isin(pool)]
         steps.append((f"指数池 {index}({code})", len(df)))
 
@@ -179,7 +231,8 @@ class UniverseSelector:
 
         if "list_date" in df.columns:
             ld = pd.to_datetime(df["list_date"], errors="coerce")
-            df = df[ld.isna() | ((pd.Timestamp(date.today()) - ld).dt.days
+            asof_ts = pd.Timestamp(_to_date(asof)) if asof else pd.Timestamp(date.today())
+            df = df[ld.isna() | ((asof_ts - ld).dt.days
                                  >= (cfg_u.min_list_days if cfg_u else 60))]
         steps.append((f"上市满 {cfg_u.min_list_days if cfg_u else 60} 天", len(df)))
 

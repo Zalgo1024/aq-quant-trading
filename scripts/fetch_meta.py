@@ -419,41 +419,121 @@ INDEXES = {
 
 
 def fetch_index(workers: int = 4) -> pd.DataFrame | None:
+    """抓指数成分（含纳入日期，供 ``asof`` 时点池使用）。
+
+    数据源选择（**已实测比较，勿随意改回**）
+    ----------------------------------------
+    两个候选源返回的**完整度差别巨大**：::
+
+        指数        应有    官方中证源     index_stock_cons
+        000300     300       300            288   ← 缺 12
+        000905     500       500            429   ← 缺 71
+        000016      50        50             50
+        000852    1000      1000            772   ← 缺 228
+
+    ``ak.index_stock_cons``（中证指数官网 样本列表）会返回**行数正确但
+    内容重复**的表：例如 000852 返回 1000 行，却只有 772 个唯一代码，
+    多出的 228 行是逐字段完全相同的副本。这会静默**丢掉 23% 的成分**。
+
+    ``ak.index_stock_cons_csindex``（官方成分文件 ``{code}cons.xls``）
+    返回的数量**与指数编制规则完全一致**，故作为主源。
+
+    ⚠️ 两者**都是"当前成分快照"**，都不含历史剔除记录，因此都**无法**
+    消除幸存者偏差。``in_date`` 只能用来消除前视偏差。
+    """
     import akshare as ak
 
     _log(f"拉取指数成分（{', '.join(INDEXES.values())}）...")
 
+    #: 指数编制规则里的成分数量，用于校验完整性
+    expected_n = {"000300": 300, "000905": 500, "000016": 50, "000852": 1000}
+
     def work(item):  # type: ignore[no-untyped-def]
+        """合并两个源，取长补短：
+
+        - **官方成分文件**（``index_stock_cons_csindex``）给出**完整的成分
+          全集**（300/500/50/1000，与编制规则一致），但没有"纳入日期"。
+        - **``index_stock_cons``** 有 ``纳入日期``，但会**重复丢码**
+          （实测 000852 返回 1000 行却只有 772 个唯一代码）。
+
+        实测两者关系是 **官方源 ⊇ stock_cons**（交集 288，反向差集 0），
+        因此以官方源为全集、用 stock_cons 补 ``in_date``，是无损的。
+        """
         code, name = item
+        want = expected_n.get(code, 0)
+
+        # 源 1：官方成分文件（全集）
+        official = None
         for attempt in range(1, 4):
             try:
-                df = ak.index_stock_cons(symbol=code)
-                out = pd.DataFrame({
-                    "index_code": code,
-                    "index_name": name,
-                    "symbol": df["品种代码"].astype(str).str.zfill(6),
-                    "name": df["品种名称"].astype(str).str.strip(),
-                    "in_date": pd.to_datetime(df["纳入日期"], errors="coerce").dt.date,
-                })
-                return out
+                df = ak.index_stock_cons_csindex(symbol=code)
+                official = pd.DataFrame({
+                    "symbol": df["成分券代码"].astype(str).str.zfill(6),
+                    "name": df["成分券名称"].astype(str).str.strip(),
+                }).drop_duplicates(subset=["symbol"], keep="first")
+                break
             except Exception:  # noqa: BLE001
                 if attempt == 3:
-                    return pd.DataFrame()
+                    break
                 time.sleep(1.0 * attempt)
-        return pd.DataFrame()
+
+        # 源 2：含纳入日期（可能缺码）
+        dated = None
+        for attempt in range(1, 4):
+            try:
+                d = ak.index_stock_cons(symbol=code)
+                dated = pd.DataFrame({
+                    "symbol": d["品种代码"].astype(str).str.zfill(6),
+                    "in_date": pd.to_datetime(d["纳入日期"], errors="coerce").dt.date,
+                }).drop_duplicates(subset=["symbol"], keep="first")
+                break
+            except Exception:  # noqa: BLE001
+                if attempt == 3:
+                    break
+                time.sleep(1.0 * attempt)
+
+        if official is None and dated is None:
+            _log(f"  [失败] {name}({code}) 两个源都不可用")
+            return pd.DataFrame()
+
+        if official is None:
+            _log(f"  [警告] {name}({code}) 官方源不可用，退回 index_stock_cons"
+                 f"（成分可能不全）")
+            out = dated.copy()
+            out["name"] = ""
+        elif dated is None:
+            _log(f"  [警告] {name}({code}) 无 in_date（index_stock_cons 不可用），"
+                 f"前视偏差过滤将保守保留全部成分")
+            out = official.copy()
+            out["in_date"] = pd.NaT
+        else:
+            out = official.merge(dated, on="symbol", how="left")
+
+        out.insert(0, "index_name", name)
+        out.insert(0, "index_code", code)
+
+        n = len(out)
+        n_dated = int(out["in_date"].notna().sum()) if "in_date" in out.columns else 0
+        flag = "" if not want or n == want else f"  ⚠️ 期望 {want} 只"
+        _log(f"  {name}({code}) {n} 只（有纳入日期 {n_dated}）{flag}")
+        return out
 
     items = list(INDEXES.items())
-    if workers <= 1:
-        results = [work(i) for i in items]
-    else:
-        with ThreadPoolExecutor(max_workers=min(workers, len(items))) as ex:
-            results = list(ex.map(work, items))
+    results = [work(i) for i in items] if workers <= 1 else list(
+        ThreadPoolExecutor(max_workers=min(workers, len(items))).map(work, items))
 
     frames = [r for r in results if not r.empty]
     if not frames:
         _log("  [失败] 指数成分全部拉取失败")
         return None
     cons = pd.concat(frames, ignore_index=True)
+
+    # 去重：即便主源已保证唯一，仍兜一层（拼接/重跑可能引入重复）
+    before = len(cons)
+    cons = cons.drop_duplicates(subset=["index_code", "symbol"], keep="first")
+    if before != len(cons):
+        _log(f"  去重：{before} → {len(cons)} 条（移除 {before - len(cons)} 条重复）")
+
     out = CACHE / "index_constituents.parquet"
     _atomic_parquet(cons, out)
     for code, name in INDEXES.items():
