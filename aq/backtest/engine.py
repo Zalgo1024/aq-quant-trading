@@ -53,8 +53,14 @@ class BacktestEngine:
         self.risk = RiskEngine(limit)
 
         self.library = FactorLibrary()
-        # P2：权重来源由 model.weight_source 决定（prior / ic）
+        # 权重来源由 model.weight_source 决定（prior / ic / ic_wf）
         self.scorer = build_scorer(cfg, self.library)
+        # Walk-forward 定权器（"ic_wf" 时非 None）。
+        # 上面那行加载的是**静态**权重，只作为首个 refit 点之前的兜底；
+        # 真正的权重由 _score_at 在每个 refit 时点按滚动窗口替换。
+        # 见 aq/factors/walkforward.py 与报告 7.14。
+        self._wf = (self._build_weighter(cfg) if (
+            getattr(cfg.model, "weight_source", "prior") == "ic_wf") else None)
         self.portfolio = TopKPortfolio(
             top_k=cfg.model.top_k,
             min_score=cfg.model.score_threshold,
@@ -510,7 +516,38 @@ class BacktestEngine:
             s["avg_qualified"] = round(sum(self._npass_series) / len(self._npass_series), 2)
             s["top_k"] = int(getattr(self.portfolio, "top_k", 0) or 0)
             s["min_score"] = float(getattr(self.portfolio, "min_score", 0.0) or 0.0)
+        s.update(self._wf_stats())
         return s
+
+    def _wf_stats(self) -> dict:
+        """walk-forward 定权的过程诊断。
+
+        ``wf_weight_turnover`` 特别值得看：它度量"相邻两次 refit 之间权重变动多大"。
+        如果 IC 定出来的权重每次都在大改，说明研究结论本身在漂 ——
+        那么"样本外收益差"就不仅是策略问题，而是**信号不稳定**的直接证据。
+        """
+        wf = getattr(self, "_wf", None)
+        if wf is None or not wf.history:
+            return {}
+        hs = wf.history
+        l1: list[float] = []
+        for a, b in zip(hs, hs[1:]):
+            wa, wb = a.get("weights", {}), b.get("weights", {})
+            keys = set(wa) | set(wb)
+            l1.append(sum(abs(wb.get(k, 0.0) - wa.get(k, 0.0)) for k in keys))
+        nf = [h.get("n_factors_weighted", 0) for h in hs]
+        out = {
+            "wf_refits": len(hs),
+            "wf_first_refit": hs[0].get("asof"),
+            "wf_last_refit": hs[-1].get("asof"),
+            "wf_avg_factors": round(sum(nf) / len(nf), 1) if nf else 0,
+            "wf_min_factors": min(nf) if nf else 0,
+            "wf_max_factors": max(nf) if nf else 0,
+        }
+        if l1:
+            out["wf_weight_turnover"] = round(sum(l1) / len(l1), 4)
+            out["wf_weight_turnover_max"] = round(max(l1), 4)
+        return out
 
     def _print_exposure(self) -> None:
         s = self._exposure_stats()
@@ -687,7 +724,64 @@ class BacktestEngine:
     # ------------------------------------------------------------------ 打分
     def _score_at(self, ds: str):  # type: ignore[no-untyped-def]
         """用截至 ds（含）的因子横截面打分。"""
+        # Walk-forward：到点就地换权重，再打分。**必须在打分之前**，
+        # 否则当天的选股用的还是上一窗口的旧权重。
+        if self._wf is not None:
+            self._wf.maybe_refit(ds, self.scorer)
         return self.scorer.score_cross_section(self._factors_at(ds))
+
+    # ------------------------------------------------------ walk-forward 定权
+    @staticmethod
+    def _build_weighter(cfg):  # type: ignore[no-untyped-def]
+        """装配 WalkForwardWeighter：从 IC 研究产物里取逐日 IC 时序。
+
+        只读 ``ic_ts.parquet``（逐日 IC，几百 KB），**不需要加载几百 MB 的因子面板** ——
+        这是"IC 是逐日横截面统计量、不依赖估计窗口"这个性质带来的直接好处。
+        """
+        from pathlib import Path
+
+        from aq.factors.walkforward import WalkForwardWeighter
+
+        sp = getattr(cfg.model, "ic_summary_path", "") or ""
+        if not sp:
+            raise RuntimeError(
+                "weight_source='ic_wf' 需要 model.ic_summary_path 指向因子研究的 "
+                "summary.csv（同目录需有 ic_ts.parquet）")
+        sdir = Path(sp).parent
+        ic_path = sdir / "ic_ts.parquet"
+        if not ic_path.exists():
+            raise RuntimeError(
+                f"找不到逐日 IC 时序 {ic_path}，无法做 walk-forward 定权。\n"
+                f"  请先跑 `python scripts/factor_research.py --neutralize` 生成ic_ts.parquet")
+
+        ic_ts = pd.read_parquet(ic_path)
+
+        # 未中性化变体的同时序 IC：中性化抗性门控的分母
+        ic_ts_raw = None
+        rp = getattr(cfg.model, "ic_raw_summary_path", "") or ""
+        if rp:
+            rdir = Path(rp)
+            rdir = rdir if rdir.is_dir() else rdir.parent
+            r_ic = rdir / "ic_ts.parquet"
+            if r_ic.exists() and r_ic != ic_path:
+                ic_ts_raw = pd.read_parquet(r_ic)
+                print(f"[WF] 已加载未中性化 IC 时序（中性化抗性门控的分母）<- {r_ic.name}")
+            else:
+                print(f"[WF] ⚠️ 未找到未中性化 IC 时序（{r_ic}），"
+                      f"中性化抗性门控将退化为恒真")
+
+        corr_static = None
+        cpath = sdir / "corr.csv"
+        if cpath.exists():
+            try:
+                corr_static = pd.read_csv(cpath, index_col=0)
+            except Exception:  # noqa: BLE001
+                corr_static = None
+
+        return WalkForwardWeighter(
+            cfg, ic_ts, ic_ts_raw=ic_ts_raw, corr_static=corr_static,
+            corr_mode=str(getattr(cfg.model, "wf_corr_mode", "ic") or "ic"),
+        )
 
     @property
     def last_predictions(self):  # type: ignore[no-untyped-def]

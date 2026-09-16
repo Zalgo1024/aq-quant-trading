@@ -71,6 +71,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--universe", default="hs300", choices=["hs300", "liquid", "all"])
     p.add_argument("--variant", default="full_neu")
     p.add_argument("--tag", default="main", help="结果目录后缀，区分不同实验")
+    p.add_argument("--ic-raw", default="",
+                   help="未中性化变体目录（如 runtime/factor_research/full_raw）。"
+                        "walk-forward 的'中性化抗性门控'需要它做分母，"
+                        "不传则该门控恒真")
 
     # --- 配置网格 ---
     p.add_argument("--hold-list", default="1,5,10,20",
@@ -81,6 +85,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="权重方案候选，逗号分隔（ic / prior）")
     p.add_argument("--base-hold", type=int, default=10)
     p.add_argument("--base-turnover", type=float, default=0.0)
+    p.add_argument("--wf-window", type=int, default=504,
+                   help="walk-forward 定权的回看窗口（交易日）")
+    p.add_argument("--wf-refit-every", type=int, default=60,
+                   help="walk-forward 重定权间隔（交易日）")
+    p.add_argument("--wf-corr-mode", default="ic", choices=["ic", "static"],
+                   help="去冗余矩阵口径：ic=滚动（无前视）/ static=全样本（有前视，仅作对照）")
     p.add_argument("--grid", default="both", choices=["both", "hold", "turnover"],
                    help="both = 单变量路径（从基准点出发，每次只动一个轴）")
 
@@ -230,7 +240,8 @@ def run_one(cfg, spec: dict, cache_dir: Path, args) -> tuple[pd.Series, dict, pd
             f"--only-stats 但缓存里没有 {label}；去掉该参数先跑回测")
 
     t0 = time.time()
-    res = BacktestEngine(cfg).run()
+    engine = BacktestEngine(cfg)
+    res = engine.run()
     el = time.time() - t0
 
     eq = pd.Series([p.equity for p in res.equity],
@@ -256,7 +267,17 @@ def run_one(cfg, spec: dict, cache_dir: Path, args) -> tuple[pd.Series, dict, pd
     }
     meta.update({k: v for k, v in (getattr(res, "diagnostics", None) or {}).items()
                  if k in ("avg_exposure", "avg_holdings", "days_over_90pct",
-                          "rejected_orders")})
+                          "rejected_orders") or k.startswith("wf_")})
+
+    # walk-forward 审计：每次重定权的时点、窗口、以及当时的完整权重向量。
+    # 这是事后回答"样本外收益差，到底是信号不稳还是执行问题"的唯一依据。
+    wf = getattr(engine, "_wf", None)
+    if wf is not None and wf.history:
+        try:
+            wf.summary_frame().to_csv(
+                cache_dir / f"{label}.wf.csv", index=False, encoding="utf-8")
+        except Exception as e:  # noqa: BLE001
+            print(f"      （WF 审计落盘失败：{e}）")
 
     b = _bench_daily(cfg, list(eq.index))
 
@@ -386,6 +407,11 @@ def main(argv: list[str] | None = None) -> int:
     cfg.model.ic_summary_path = str(vdir / "summary.csv")
     cfg.model.ic_weight_mode = "icir"
     cfg.model.ic_select = True
+    if args.ic_raw:
+        cfg.model.ic_raw_summary_path = str(Path(args.ic_raw) / "summary.csv")
+    cfg.model.wf_window = int(args.wf_window)
+    cfg.model.wf_refit_every = int(args.wf_refit_every)
+    cfg.model.wf_corr_mode = str(args.wf_corr_mode)
 
     uni_note = _apply_universe(cfg, args.universe)
     print(f"[池子] {args.universe} —— {uni_note}")

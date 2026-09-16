@@ -399,7 +399,15 @@ def select_factors(
     if icir_col in sig.columns:
         neu_col = next((c for c in ("icir_neu", "rank_icir_neu") if c in sig.columns), None)
         if neu_col:
-            ratio = sig[neu_col].abs() / sig[icir_col].abs().replace(0, np.nan)
+            # ⚠️ 分母必须是**未中性化**的 ICIR —— 本函数 docstring 写的就是
+            # |icir_neu| / |icir_raw|，但早期实现用了 icir_col（= rank_icir）。
+            # 在主口径 `full_neu*` 变体下 rank_icir ≡ icir_neu，比值恒等于 1，
+            # 于是**这道门从未生效过**；只有在 `full_raw` 变体下才恰好是对的。
+            # 换成 icir_raw 后立刻抓到 limit_up_cnt_20（比值 0.184）——
+            # 正是 docstring 里点名的那类因子：预测力几乎全部来自风格暴露。
+            raw_col = next((c for c in ("icir_raw", "rank_icir_raw") if c in sig.columns),
+                           icir_col)
+            ratio = sig[neu_col].abs() / sig[raw_col].abs().replace(0, np.nan)
             style_dep = ratio < min_neg_icir_keep
             for nm in sig.loc[style_dep, name_col]:
                 rejected["风格依赖"].append(str(nm))

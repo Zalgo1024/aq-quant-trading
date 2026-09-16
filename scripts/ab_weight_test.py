@@ -249,6 +249,18 @@ def main(argv: list[str] | None = None) -> int:
     cfg.backtest.initial_cash = args.capital
     cfg.backtest.panel_force = bool(getattr(args, "force_panel", False))
 
+    # ---- 定权参数透传 ----
+    # ⚠️ 这四项曾经是**死参数**：在 argparse 里定义了，但脚本从头到尾没读过
+    # （`args.icir_ratio` / `args.shrink` / `args.cap` 引用次数均为 0），
+    # 于是"我用 --icir-ratio 扫过中性化门控"这种说法从来没有真正成立过。
+    # 它们改的是**哪些因子拿到权重**，直接决定回测/对照实验的结论，必须接线。
+    cfg.model.ic_cap = args.cap
+    cfg.model.ic_shrink = args.shrink
+    cfg.model.ic_min_icir_ratio = args.icir_ratio
+    if args.risk_turnover is not None:
+        # 单点覆盖风控流动性门槛（--scan-risk 是它的多点版本，两者可互换）
+        cfg.risk.liquidity_min_turnover = float(args.risk_turnover)
+
     # 池子口径
     uni_note = _apply_universe(cfg, args.universe)
     print(f"\n[池子] {args.universe} —— {uni_note}")

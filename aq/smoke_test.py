@@ -449,6 +449,39 @@ def t_cscv() -> None:
 
 
 # ==========================================================================
+# 10. Walk-forward 定权的**前视偏差**检验
+# ==========================================================================
+
+
+def t_wf_lookahead() -> None:
+    """用合成 IC 时序验证 walk-forward 切片不含前视。
+
+    为什么这一项不能省
+    ------------------
+    前视是**静默**类错误：切片位置错了程序照样跑完、照样出夏普，只是这个
+    夏普不是样本外的。而 7.13 / 7.14 的全部结论都建立在"喂给 CSCV 的日收益
+    是样本外的"这个前提上 —— 这个前提只由 walkforward.py 里几行切片保证，
+    所以必须把断言钉住。
+
+    检验体在 ``scripts/wf_lookahead_check.py``（可单独运行，含
+    "扰动未来数据"这一因果层黄金标准），这里只做断言汇总，避免
+    同一套逻辑写两份、然后悄悄分叉。
+    """
+    import importlib.util
+    from pathlib import Path
+
+    p = Path(__file__).resolve().parent.parent / "scripts" / "wf_lookahead_check.py"
+    assert p.exists(), f"缺少前视检验脚本 {p}"
+    spec = importlib.util.spec_from_file_location("_wf_lookahead_check", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+
+    assert mod.check_lag_boundary(), "公式层失败：refit 用到了 d-(horizon+lag) 之后的 IC"
+    assert mod.check_causal_perturbation(), "因果层失败：扰动未来数据改变了历史权重"
+    assert mod.check_refit_cadence(), "节奏层失败：refit 时点未单调推进或间隔不足"
+
+
+# ==========================================================================
 # main
 # ==========================================================================
 
@@ -467,6 +500,7 @@ def main() -> int:
     check("7. API 端点（health/market/signals/backtest…）", t_api)
     check("8. 实盘适配器壳正确报错", t_live_shell)
     check("9. 防过拟合统计标定（PBO 零假设≈0.5 / DSR / N_eff）", t_cscv)
+    check("10. Walk-forward 定权的前视偏差（公式/因果/节奏三层）", t_wf_lookahead)
 
     print("-" * 70)
     passed = sum(1 for _, ok, _ in _results if ok)

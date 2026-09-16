@@ -75,6 +75,9 @@ def build_scorer(cfg=None, library: "FactorLibrary | None" = None) -> "FactorSco
     """按配置构造打分器（回测 / 模拟 / API 统一入口）。
 
     ``model.weight_source="ic"`` 时自动加载最近一次因子研究的 IC 结果定权；
+    ``"ic_wf"`` 时同样先加载一份静态权重作为**兜底**（首个 refit 点之前要用），
+    随后由 ``WalkForwardWeighter`` 在回测过程中按滚动窗口不断替换。
+
     找不到结果时**静默降级**为先验权重，不会让线上流程崩掉。
     """
     lib = library or FactorLibrary()
@@ -83,7 +86,7 @@ def build_scorer(cfg=None, library: "FactorLibrary | None" = None) -> "FactorSco
         return FactorScorer(lib)
 
     m = getattr(cfg, "model", None)
-    if m is None or getattr(m, "weight_source", "prior") != "ic":
+    if m is None or getattr(m, "weight_source", "prior") not in ("ic", "ic_wf"):
         return FactorScorer(lib)
 
     path = getattr(m, "ic_summary_path", "") or ""
@@ -103,9 +106,13 @@ def build_scorer(cfg=None, library: "FactorLibrary | None" = None) -> "FactorSco
             min_abs_ic=getattr(m, "ic_min_abs", 0.01),
             max_p=getattr(m, "ic_max_p", 0.10),
             cap=getattr(m, "ic_cap", 0.25),
+            shrink=getattr(m, "ic_shrink", 1.0),
             select=getattr(m, "ic_select", True),
             corr=corr if corr.exists() else None,
             corr_threshold=getattr(m, "ic_corr_threshold", 0.85),
+            # 中性化抗性门控。必须在这里透传：ab_weight_test.py 的
+            # --icir-ratio 以前只解析不使用，配置改了也影响不到定权结果。
+            min_icir_ratio=getattr(m, "ic_min_icir_ratio", 0.5),
         )
         print(f"[打分] 已加载 IC 权重 <- {Path(p).parent.name}"
               f"（{len(scorer.active_factors())} 个因子有权重，来源 {scorer.ic_source}）")
@@ -259,7 +266,12 @@ class FactorScorer:
                 keep_mask = (df[ic_col].abs() >= min_abs_ic) & (df[p_col] <= max_p)
                 neu = df["icir_neu"] if "icir_neu" in df.columns else None
                 if neu is not None:
-                    ratio = neu.abs() / df[val_col].abs().replace(0, float("nan"))
+                    # ⚠️ 分母用**未中性化**的 icir_raw，不能用 val_col（rank_icir）：
+                    # 在 full_neu 变体下两者相等，比值恒为 1，门控形同虚设。
+                    # 同 aq/factors/ic.py:select_factors 的说明。
+                    raw_col = next((c for c in ("icir_raw", "rank_icir_raw")
+                                    if c in df.columns), val_col)
+                    ratio = neu.abs() / df[raw_col].abs().replace(0, float("nan"))
                     keep_mask &= ratio >= min_icir_ratio
                 selected = {str(x) for x in df.index[keep_mask]}
             else:

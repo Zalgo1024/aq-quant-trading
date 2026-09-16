@@ -137,9 +137,20 @@ class ModelConfig(BaseModel):
     ic_max_p: float = 0.10
     # 单因子权重上限（防止一个因子垄断组合）
     ic_cap: float = 0.25
+    # 幂次压缩指数：w ∝ |v| ** ic_shrink（1.0 = 线性不压缩）。
+    # 取值 >1 会把强因子进一步拉开差距。
+    ic_shrink: float = 1.0
     # 是否启用因子筛选：显著性门控 + 中性化抗性检查 + 相关性去冗余。
     # 关掉会让高相关因子重复计权（P2 首轮 A/B 对照已证实会显著变差）。
     ic_select: bool = True
+    # 中性化抗性门控：|icir_neu| / |icir_raw| 低于此值即剔除（默认 0.5）。
+    #
+    # 为什么必须显式配这一项：`scripts/ab_weight_test.py` 一直有 `--icir-ratio`
+    # 这个开关，但**从未被透传到打分器**，落在这里的永远是函数默认值 ——
+    # 典型"配置看起来能调、其实调不动"。更早的实现连分母都用错了
+    # （用 rank_icir 而非 icir_raw，在 full_neu 变体下比值恒为 1），
+    # 两层叠加使这道门彻底失效。见 aq/factors/ic.py:select_factors 的注释。
+    ic_min_icir_ratio: float = 0.5
     # 相关性去冗余阈值
     ic_corr_threshold: float = 0.85
     # IC 权重加载失败时是否直接报错（默认 True = 报错）。
@@ -150,6 +161,16 @@ class ModelConfig(BaseModel):
     # 研究场景下，**响亮的报错远比安静的降级有价值**。
     # 线上实盘若不想因研究产物缺失而中断，可显式设为 False。
     ic_strict: bool = True
+
+    # ---- Walk-forward 定权（weight_source="ic_wf"）----
+    # 只用截至时点的历史 IC 重新筛因子、重新定权，使日收益真正样本外。
+    # 见 aq/factors/walkforward.py 与报告 7.14。
+    wf_window: int = 504          # 回看窗口（交易日，约 2 年）
+    wf_refit_every: int = 60      # 重新定权间隔（交易日，约一季度）
+    wf_corr_mode: str = "ic"      # 去冗余矩阵口径：ic（滚动，无前视）/ static（全样本）
+    # 未中性化变体的 summary 路径。**中性化抗性门控的分母**必须用它，
+    # 否则在 full_neu 变体下 |icir_neu|/|rank_icir| 恒为 1，门控形同虚设。
+    ic_raw_summary_path: str = ""
 
 
 class FrontendConfig(BaseModel):
