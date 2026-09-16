@@ -145,10 +145,33 @@ export interface BacktestResponse {
 
 export interface FactorMeta {
   name: string
+  group: string
+  desc: string
   direction: number
   ic: number | null
   rank_ic: number | null
+  rank_icir: number | null
   icir: number | null
+  rank_ic_t: number | null
+  rank_ic_p: number | null
+  q_ls: number | null
+  q_mono: number | null
+  turnover: number | null
+  significant: boolean
+}
+
+/** 逐日 IC 时序（/api/factor/ic_ts） */
+export interface FactorIcSeries {
+  dates: string[]
+  series: Record<string, (number | null)[]>
+  note?: string
+}
+
+/** 因子相关性矩阵（/api/factor/corr） */
+export interface FactorCorr {
+  labels: string[]
+  matrix: (number | null)[][]
+  note?: string
 }
 
 export interface HealthInfo {

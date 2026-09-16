@@ -44,17 +44,98 @@ export default function Admin() {
     },
   ]
 
+  const num = (v: number | null | undefined, digits = 4) =>
+    v == null || Number.isNaN(v) ? <span style={{ color: '#555' }}>—</span> : (
+      <span className="mono" style={{ color: v >= 0 ? '#f5222d' : '#52c41a' }}>{v.toFixed(digits)}</span>
+    )
+
   const factorCols: ColumnsType<any> = [
-    { title: '因子', dataIndex: 'name' },
+    { title: '因子', dataIndex: 'name', width: 130 },
+    { title: '组', dataIndex: 'group', width: 60, render: (v: string) => <Tag>{v}</Tag> },
+    { title: '说明', dataIndex: 'desc', width: 150, ellipsis: true },
     {
       title: '方向',
       dataIndex: 'direction',
-      width: 90,
+      width: 70,
       render: (v: number) => <Tag color={v > 0 ? 'red' : 'green'}>{v > 0 ? '正向' : '反向'}</Tag>,
     },
-    { title: 'IC', dataIndex: 'ic', width: 100, align: 'right', render: (v: any) => v ?? '待接入' },
-    { title: 'RankIC', dataIndex: 'rank_ic', width: 100, align: 'right', render: (v: any) => v ?? '待接入' },
-    { title: 'ICIR', dataIndex: 'icir', width: 100, align: 'right', render: (v: any) => v ?? '待接入' },
+    {
+      title: 'RankIC',
+      dataIndex: 'rank_ic',
+      width: 90,
+      align: 'right',
+      sorter: (a: any, b: any) => Math.abs(b.rank_ic ?? 0) - Math.abs(a.rank_ic ?? 0),
+      render: (v: number | null) => num(v),
+    },
+    {
+      title: 'ICIR',
+      dataIndex: 'rank_icir',
+      width: 80,
+      align: 'right',
+      defaultSortOrder: 'descend',
+      sorter: (a: any, b: any) => Math.abs(b.rank_icir ?? 0) - Math.abs(a.rank_icir ?? 0),
+      render: (v: number | null) => num(v, 3),
+    },
+    {
+      title: 't值(NW)',
+      dataIndex: 'rank_ic_t',
+      width: 80,
+      align: 'right',
+      render: (v: number | null) => num(v, 2),
+    },
+    {
+      title: 'p值',
+      dataIndex: 'rank_ic_p',
+      width: 80,
+      align: 'right',
+      render: (v: number | null) =>
+        v == null ? <span style={{ color: '#555' }}>—</span> : (
+          <span className="mono" style={{ color: v < 0.05 ? '#f5222d' : '#8c8c8c' }}>
+            {v < 1e-4 ? '<0.0001' : v.toFixed(4)}
+          </span>
+        ),
+    },
+    {
+      title: '多空年化',
+      dataIndex: 'q_ls',
+      width: 100,
+      align: 'right',
+      render: (v: number | null) =>
+        v == null ? <span style={{ color: '#555' }}>—</span> : (
+          <span className="mono" style={{ color: v >= 0 ? '#f5222d' : '#52c41a' }}>
+            {(v * 100).toFixed(1)}%
+          </span>
+        ),
+    },
+    {
+      title: '单调性',
+      dataIndex: 'q_mono',
+      width: 80,
+      align: 'right',
+      render: (v: number | null) => num(v, 2),
+    },
+    {
+      title: '换手',
+      dataIndex: 'turnover',
+      width: 80,
+      align: 'right',
+      render: (v: number | null) =>
+        v == null ? <span style={{ color: '#555' }}>—</span> : (
+          <span className="mono">{(v * 100).toFixed(1)}%</span>
+        ),
+    },
+    {
+      title: '显著',
+      dataIndex: 'significant',
+      width: 70,
+      align: 'center',
+      filters: [
+        { text: '显著', value: true },
+        { text: '不显著', value: false },
+      ],
+      onFilter: (val: any, r: any) => r.significant === val,
+      render: (v: boolean) => (v ? <Tag color="red">✓</Tag> : <Tag>—</Tag>),
+    },
   ]
 
   return (
@@ -125,17 +206,33 @@ export default function Admin() {
       </Card>
 
       <Card
-        title="因子列表"
+        title="因子检验结果"
         size="small"
         style={{ marginTop: 16 }}
-        extra={<span style={{ fontSize: 12, color: '#8c8c8c' }}>{(factors as any)?.note ?? ''}</span>}
+        extra={
+          <span style={{ fontSize: 12, color: '#8c8c8c' }}>
+            {(factors as any)?.generated_at
+              ? `样本 ${(factors as any)?.meta?.start ?? ''}~${(factors as any)?.meta?.end ?? ''}｜${(factors as any)?.meta?.n_symbols ?? '-'} 只 / ${(factors as any)?.meta?.n_days ?? '-'} 天${(factors as any)?.meta?.neutralized ? '｜已中性化' : ''}｜生成于 ${(factors as any)?.generated_at}`
+              : (factors as any)?.note ?? ''}
+          </span>
+        }
       >
+        {!(factors as any)?.generated_at && (
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message="尚无因子检验结果"
+            description="运行 `python scripts/factor_research.py` 生成后刷新本页。"
+          />
+        )}
         <Table
           rowKey="name"
           size="small"
           columns={factorCols}
           dataSource={factors?.factors ?? []}
           pagination={false}
+          scroll={{ x: 1200 }}
         />
       </Card>
 

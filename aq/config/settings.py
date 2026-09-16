@@ -91,6 +91,33 @@ class ModelConfig(BaseModel):
     top_k: int = 20
     score_threshold: float = 0.55
 
+    # ---- P2：因子打分 ----
+    # 权重来源："prior"（内置先验）| "ic"（读因子研究实测 IC 自动定权）
+    weight_source: str = "prior"
+    # weight_source="ic" 时读取的 summary.csv（相对项目根或绝对路径）。
+    # 留空则自动取 runtime/factor_research/ 下最新的一次结果。
+    ic_summary_path: str = ""
+    # IC 定权方式：icir（强度/稳定性兼顾，推荐）| ic（只看强度）
+    ic_weight_mode: str = "icir"
+    # 纳入门槛：|RankIC| >= min_abs_ic 且 p <= max_p 的因子才有权重
+    ic_min_abs: float = 0.01
+    ic_max_p: float = 0.10
+    # 单因子权重上限（防止一个因子垄断组合）
+    ic_cap: float = 0.25
+    # 是否启用因子筛选：显著性门控 + 中性化抗性检查 + 相关性去冗余。
+    # 关掉会让高相关因子重复计权（P2 首轮 A/B 对照已证实会显著变差）。
+    ic_select: bool = True
+    # 相关性去冗余阈值
+    ic_corr_threshold: float = 0.85
+    # IC 权重加载失败时是否直接报错（默认 True = 报错）。
+    #
+    # 为什么默认严格：曾经出现过 summary.csv 列名不符合契约（rank_icir 被
+    # 误改名），加载失败被静默吞掉退回先验权重，导致 A/B 对照实验的
+    # "IC 加权组"实际跑的还是先验权重，却得出"IC 加权无效"的假结论。
+    # 研究场景下，**响亮的报错远比安静的降级有价值**。
+    # 线上实盘若不想因研究产物缺失而中断，可显式设为 False。
+    ic_strict: bool = True
+
 
 class FrontendConfig(BaseModel):
     theme: str = "dark"

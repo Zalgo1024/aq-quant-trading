@@ -15,6 +15,8 @@ from __future__ import annotations
 from datetime import date, datetime
 from uuid import uuid4
 
+import pandas as pd
+
 from aq.backtest.metrics import compute_metrics
 from aq.core.models import (
     Account,
@@ -29,7 +31,7 @@ from aq.data.provider import DataProvider, get_provider
 from aq.data.universe import UniverseSelector
 from aq.execution.sim_gateway import SimGateway
 from aq.factors.library import FactorLibrary
-from aq.factors.scoring import FactorScorer
+from aq.factors.scoring import build_scorer
 from aq.portfolio.construct import TopKPortfolio
 from aq.portfolio.risk import RiskEngine, RiskLimit
 
@@ -50,7 +52,8 @@ class BacktestEngine:
         self.risk = RiskEngine(limit)
 
         self.library = FactorLibrary()
-        self.scorer = FactorScorer(self.library)
+        # P2：权重来源由 model.weight_source 决定（prior / ic）
+        self.scorer = build_scorer(cfg, self.library)
         self.portfolio = TopKPortfolio(
             top_k=cfg.model.top_k,
             min_score=cfg.model.score_threshold,
@@ -60,6 +63,10 @@ class BacktestEngine:
         self._bars: dict[str, dict[str, Bar]] = {}   # symbol -> date -> Bar
         self._last_predictions = []
         self._rejected_count = 0
+        # P2：预计算的因子矩阵 {date: DataFrame(index=symbol, columns=因子)}
+        # 用它替代"每天对每只股票重算一遍因子"——后者在因子数从 10 增到 27 后
+        # 复杂度爆炸（回测从秒级掉到十几分钟）。
+        self._panel: dict[str, pd.DataFrame] = {}
 
     # ------------------------------------------------------------------ 准备
     def _prepare(self) -> list[date]:
@@ -91,6 +98,12 @@ class BacktestEngine:
             s for s in self.symbols if meta.get(s, {}).get("is_st")
         }
 
+        # 流通股本：换手率因子需要（缺股本时该因子返回 None，不影响其它因子）
+        self.library.float_shares = {
+            s: (meta.get(s, {}).get("float_share") or meta.get(s, {}).get("total_share") or 0.0)
+            for s in self.symbols
+        }
+
         print(f"股票池：{len(self.symbols)} 只（universe.index="
               f"{getattr(self.cfg.universe, 'index', 'all')}）")
 
@@ -100,7 +113,63 @@ class BacktestEngine:
             self._bars[sym] = {b.time.strftime("%Y-%m-%d"): b for b in bars}
             all_dates.update(b.time.date() for b in bars)
 
+        self._build_factor_panel()
         return sorted(all_dates)
+
+    # ------------------------------------------------------------- 因子面板
+    def _build_factor_panel(self) -> None:
+        """一次性把回测区间内所有股票的因子算好，按日期切片缓存。
+
+        走 :mod:`aq.factors.panel` 的向量化内核，与因子研究用的是同一套算法，
+        因此"研究里有效的因子"和"回测里用的因子"不可能对不上。
+        失败时静默降级为逐日标量计算（慢但不会阻塞流程）。
+        """
+        from aq.factors.panel import FactorPanelBuilder, PanelConfig
+
+        dates = sorted({d for m in self._bars.values() for d in m})
+        if not dates:
+            return
+        try:
+            pcfg = PanelConfig(
+                start=dates[0],
+                end=dates[-1],
+                universe="all",
+                factors=list(self.library.names),
+                symbols=list(self.symbols),
+            )
+            panel = FactorPanelBuilder(pcfg).build()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[警告] 因子面板构建失败（{type(exc).__name__} {exc}），"
+                  f"退化为逐日标量计算（较慢）")
+            return
+
+        fac_cols = [c for c in self.library.names if c in panel.columns]
+        panel = panel[["date", "symbol"] + fac_cols]
+        self._panel = {d: g.set_index("symbol")[fac_cols]
+                       for d, g in panel.groupby("date", sort=False)}
+        print(f"因子面板：{len(panel):,} 行 / {len(self._panel)} 个交易日 / "
+              f"{len(fac_cols)} 个因子")
+
+    def _factors_at(self, ds: str) -> dict[str, dict[str, float | None]]:
+        """取 ds 日（含）为止的因子横截面。"""
+        if self._panel:
+            sub = self._panel.get(ds)
+            if sub is not None and not sub.empty:
+                return {
+                    sym: {c: (None if pd.isna(v) else float(v)) for c, v in row.items()}
+                    for sym, row in sub.iterrows()
+                }
+            return {}
+
+        # 降级路径：逐只股票用标量因子库现算
+        factor_map: dict[str, dict[str, float | None]] = {}
+        for sym in self.symbols:
+            series = self._bars.get(sym, {})
+            bars = [b for k, b in sorted(series.items()) if k <= ds]
+            if len(bars) < 60:
+                continue
+            factor_map[sym] = self.library.compute(sym, bars)
+        return factor_map
 
     # ------------------------------------------------------------------ 主循环
     def run(self) -> BacktestResult:
@@ -217,15 +286,8 @@ class BacktestEngine:
 
     # ------------------------------------------------------------------ 打分
     def _score_at(self, ds: str):  # type: ignore[no-untyped-def]
-        """用截至 ds（含）的历史 bar 计算因子并横截面打分。"""
-        factor_map: dict[str, dict[str, float | None]] = {}
-        for sym in self.symbols:
-            series = self._bars.get(sym, {})
-            bars = [b for k, b in sorted(series.items()) if k <= ds]
-            if len(bars) < 60:
-                continue
-            factor_map[sym] = self.library.compute(sym, bars)
-        return self.scorer.score_cross_section(factor_map)
+        """用截至 ds（含）的因子横截面打分。"""
+        return self.scorer.score_cross_section(self._factors_at(ds))
 
     @property
     def last_predictions(self):  # type: ignore[no-untyped-def]

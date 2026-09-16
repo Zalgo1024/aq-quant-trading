@@ -18,7 +18,10 @@
 
 from __future__ import annotations
 
+import json
+import math
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
@@ -27,11 +30,11 @@ from pydantic import BaseModel
 
 from aq import __version__
 from aq.backtest.engine import BacktestEngine
-from aq.config.settings import get_settings
+from aq.config.settings import PROJECT_ROOT, get_settings
 from aq.core.models import Anomaly, BacktestResult, Prediction
 from aq.data.provider import get_provider
 from aq.factors.library import FactorLibrary
-from aq.factors.scoring import FactorScorer
+from aq.factors.scoring import build_scorer
 
 app = FastAPI(
     title="A 股 AI 量化交易系统 API",
@@ -142,7 +145,7 @@ def _score_all() -> list[Prediction]:
     cfg = _cfg()
     provider = _provider()
     lib = FactorLibrary()
-    scorer = FactorScorer(lib)
+    scorer = build_scorer(cfg, lib)
 
     factor_map: dict[str, dict[str, float | None]] = {}
     names: dict[str, str] = {}
@@ -233,18 +236,137 @@ def signals(min_confidence: float = 0.0, top: int = 20) -> list[dict]:
     return out
 
 
-# ---------------------------------------------------------------- 因子
+FACTOR_DIR = PROJECT_ROOT / "runtime" / "factor_research"
+
+
+def _latest_factor_dir() -> "Path | None":
+    """最新的因子研究结果目录。"""
+    if not FACTOR_DIR.exists():
+        return None
+    dirs = [d for d in FACTOR_DIR.iterdir() if d.is_dir() and (d / "summary.csv").exists()]
+    if not dirs:
+        return None
+    return max(dirs, key=lambda d: d.stat().st_mtime)
+
+
 @app.get("/api/factor/analysis")
 def factor_analysis() -> dict:
-    """因子概览：IC 等（P1 接入 alphalens 后替换为真实计算）。"""
+    """因子概览：优先返回真实 IC 检验结果，无结果时退化为因子清单。"""
     lib = FactorLibrary()
-    return {
-        "factors": [
-            {"name": n, "direction": lib.direction(n), "ic": None, "rank_ic": None, "icir": None}
-            for n in lib.names
-        ],
-        "note": "P1 阶段接入 alphalens 计算真实 IC/RankIC/ICIR；当前为占位。",
+    base = {
+        n: {
+            "name": n,
+            "group": lib.group(n),
+            "desc": lib.desc(n),
+            "direction": lib.direction(n),
+            "ic": None,
+            "rank_ic": None,
+            "rank_icir": None,
+            "icir": None,
+            "rank_ic_t": None,
+            "rank_ic_p": None,
+            "q_ls": None,
+            "q_mono": None,
+            "turnover": None,
+            "significant": False,
+        }
+        for n in lib.names
     }
+
+    d = _latest_factor_dir()
+    if d is None:
+        return {
+            "factors": list(base.values()),
+            "meta": {},
+            "note": "尚无因子检验结果。运行 `python scripts/factor_research.py` 生成。",
+        }
+
+    try:
+        import pandas as pd
+
+        summary = pd.read_csv(d / "summary.csv")
+        meta = json.loads((d / "meta.json").read_text(encoding="utf-8")) if (d / "meta.json").exists() else {}
+        name_col = "因子" if "因子" in summary.columns else "factor"
+        for _, row in summary.iterrows():
+            n = str(row[name_col]).replace("_neu", "")
+            if n not in base:
+                continue
+            f = base[n]
+            f["ic"] = _f(row.get("ic"))
+            f["rank_ic"] = _f(row.get("rank_ic"))
+            f["rank_icir"] = _f(row.get("rank_icir"))
+            f["icir"] = _f(row.get("icir"))
+            f["rank_ic_t"] = _f(row.get("rank_ic_t"))
+            f["rank_ic_p"] = _f(row.get("rank_ic_p"))
+            f["q_ls"] = _f(row.get("q_ls"))
+            f["q_mono"] = _f(row.get("q_mono"))
+            f["turnover"] = _f(row.get("turnover"))
+            f["direction"] = int(row.get("direction", f["direction"]) or f["direction"])
+            p = row.get("rank_ic_p")
+            ric = row.get("rank_ic")
+            f["significant"] = bool(
+                p is not None and ric is not None
+                and float(p) < 0.05 and abs(float(ric)) > 0.02
+            )
+        return {
+            "factors": list(base.values()),
+            "meta": meta,
+            "generated_at": datetime.fromtimestamp(d.stat().st_mtime).isoformat(timespec="seconds"),
+            "note": "",
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"factors": list(base.values()), "meta": {},
+                "note": f"读取因子检验结果失败：{type(exc).__name__} {exc}"}
+
+
+@app.get("/api/factor/ic_ts")
+def factor_ic_ts(factors: str = Query("", description="逗号分隔，空=全部")) -> dict:
+    """逐日 IC 时序（前端画 IC 曲线 / 衰减用）。"""
+    d = _latest_factor_dir()
+    if d is None or not (d / "ic_ts.parquet").exists():
+        return {"dates": [], "series": {}, "note": "暂无数据"}
+    import pandas as pd
+
+    df = pd.read_parquet(d / "ic_ts.parquet")
+    want = [f.strip() for f in factors.split(",") if f.strip()]
+    series: dict[str, list[float | None]] = {}
+    for c in df.columns:
+        if not c.endswith("__rankic"):
+            continue
+        nm = c.replace("__rankic", "")
+        if want and nm not in want:
+            continue
+        series[nm] = [None if pd.isna(v) else round(float(v), 6) for v in df[c]]
+    return {"dates": [str(x) for x in df.index], "series": series}
+
+
+@app.get("/api/factor/corr")
+def factor_corr() -> dict:
+    """因子相关性矩阵（前端热力图）。"""
+    d = _latest_factor_dir()
+    if d is None or not (d / "corr.csv").exists():
+        return {"labels": [], "matrix": [], "note": "暂无数据"}
+    import pandas as pd
+
+    df = pd.read_csv(d / "corr.csv", index_col=0)
+    return {
+        "labels": [str(c) for c in df.columns],
+        "matrix": [[None if pd.isna(v) else round(float(v), 4) for v in row]
+                   for row in df.values],
+    }
+
+
+def _f(v) -> "float | None":
+    """转 float；NaN / None / 不可转换 -> None。"""
+    if v is None:
+        return None
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(x) or math.isinf(x):
+        return None
+    return round(x, 6)
 
 
 # ---------------------------------------------------------------- 异常

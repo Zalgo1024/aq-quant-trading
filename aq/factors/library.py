@@ -1,178 +1,211 @@
-"""因子库。
+"""因子库 —— 标量封装层（实时 / API 用）。
 
-第一阶段实现纯量价因子（无需财务数据即可运行），后续可扩展财务/资金流/情绪因子。
+**P2 重构说明**：因子算法本身已全部下沉到 :mod:`aq.factors.vlib`（向量化内核），
+本模块只负责把 ``list[Bar]`` 转成 DataFrame、调用内核、取最后一行。
 
-每个因子函数签名统一为::
+这样做的原因：研究和实盘必须共用同一套算法，否则"回测里有效的因子，上线后算出来
+是另一个值"——这是量化系统最隐蔽也最致命的一类 bug。
 
-    def factor_xxx(bars: list[Bar]) -> float | None
-
-返回该股票在**最后一根 bar 时点**的因子值；数据不足返回 None。
+对外 API 与 P0/P1 保持一致：``FactorLibrary.compute(symbol, bars) -> {name: value}``。
 """
 
 from __future__ import annotations
 
 import math
-from statistics import mean, pstdev
 from typing import Callable
 
+import numpy as np
+import pandas as pd
+
 from aq.core.models import Bar
+from aq.factors.vlib import FACTOR_SPECS, REQUIRES_SHARES, SPEC_BY_NAME, spec_names
 
 FactorFn = Callable[[list[Bar]], float | None]
 
+# 旧因子名 -> 新因子名（配置文件迁移用；旧配置不会因此报错）
+LEGACY_ALIAS: dict[str, str] = {
+    "momentum_20": "mom_20",
+    "momentum_60": "mom_60",
+    "reversal_5": "rev_5",
+    "reversal_20": "rev_20",
+    "volatility_20": "vol_20",
+    "volatility_60": "vol_60",
+    "ma_bias_20": "ma_bias_20",
+    "ma_cross_5_20": "ma_cross_5_20",
+    "volume_ratio": "vol_ratio",
+    "turnover_change": "turnover_chg",
+    "days_since_high": "days_since_high_60",
+    "limit_up_count": "limit_up_cnt_20",
+    "gap": "gap",
+}
 
-# --------------------------------------------------------------------------
-# 动量 / 反转
-# --------------------------------------------------------------------------
+
+def normalize_name(name: str) -> str:
+    """把旧因子名映射成当前名字（已是新名字则原样返回）。"""
+    return LEGACY_ALIAS.get(name, name)
 
 
-def momentum(bars: list[Bar], window: int = 20) -> float | None:
-    """N 日动量：(close_t / close_{t-N}) - 1。"""
-    if len(bars) < window + 1:
+# ---------------------------------------------------------------------------
+# Bar <-> DataFrame
+# ---------------------------------------------------------------------------
+
+
+def bars_to_frame(bars: list[Bar], float_share: float | None = None) -> pd.DataFrame:
+    """把 Bar 列表转成内核需要的 DataFrame。"""
+    if not bars:
+        return pd.DataFrame()
+    recs = []
+    for b in bars:
+        recs.append(
+            {
+                "time": b.time,
+                "open": b.open,
+                "high": b.high,
+                "low": b.low,
+                "close": b.close,
+                "volume": b.volume,
+                "amount": b.amount,
+                "pre_close": b.pre_close if b.pre_close is not None else np.nan,
+                "limit_up": b.limit_up if b.limit_up is not None else np.nan,
+                "limit_down": b.limit_down if b.limit_down is not None else np.nan,
+            }
+        )
+    df = pd.DataFrame(recs)
+    if float_share:
+        df["float_share"] = float(float_share)
+    return df
+
+
+def _last(v) -> float | None:
+    """取最后一个有效值；NaN / inf / 全空 -> None。"""
+    try:
+        if v is None:
+            return None
+        f = float(v)
+    except (TypeError, ValueError):
         return None
-    return bars[-1].close / bars[-window - 1].close - 1
-
-
-def reversal(bars: list[Bar], window: int = 5) -> float | None:
-    """短期反转：取负的 N 日收益（A 股短期反转效应显著）。"""
-    m = momentum(bars, window)
-    return None if m is None else -m
-
-
-def volatility(bars: list[Bar], window: int = 20) -> float | None:
-    """年化波动率（越低越好时取负）。"""
-    if len(bars) < window + 1:
+    if math.isnan(f) or math.isinf(f):
         return None
-    rets = [bars[i].close / bars[i - 1].close - 1 for i in range(1, len(bars))][-window:]
-    return pstdev(rets) * math.sqrt(242)
+    return f
 
 
-# --------------------------------------------------------------------------
-# 均线 / 趋势
-# --------------------------------------------------------------------------
-
-
-def ma_bias(bars: list[Bar], window: int = 20) -> float | None:
-    """均线乖离率：(close - MA_N) / MA_N。"""
-    if len(bars) < window:
-        return None
-    ma = mean(b.close for b in bars[-window:])
-    return (bars[-1].close - ma) / ma if ma else None
-
-
-def ma_cross(bars: list[Bar], short: int = 5, long: int = 20) -> float | None:
-    """均线交叉信号：短均线相对长均线的偏离。"""
-    if len(bars) < long:
-        return None
-    s = mean(b.close for b in bars[-short:])
-    l = mean(b.close for b in bars[-long:])
-    return (s - l) / l if l else None
-
-
-# --------------------------------------------------------------------------
-# 量能
-# --------------------------------------------------------------------------
-
-
-def volume_ratio(bars: list[Bar], window: int = 20) -> float | None:
-    """量比：当日成交量 / N 日均量。"""
-    if len(bars) < window + 1:
-        return None
-    avg = mean(b.volume for b in bars[-window - 1 : -1])
-    return bars[-1].volume / avg if avg else None
-
-
-def turnover_change(bars: list[Bar], window: int = 5, base: int = 20) -> float | None:
-    """换手率突变：近 window 日均量 / 近 base 日均量。"""
-    if len(bars) < base + window:
-        return None
-    recent = mean(b.volume for b in bars[-window:])
-    old = mean(b.volume for b in bars[-base - window : -window])
-    return recent / old if old else None
-
-
-# --------------------------------------------------------------------------
-# 距上次信号（复用彩票项目"遗漏"思路）
-# --------------------------------------------------------------------------
-
-
-def days_since_high(bars: list[Bar], window: int = 60) -> float | None:
-    """距上次 N 日新高的天数（归一化）。"""
-    if len(bars) < window:
-        return None
-    seg = bars[-window:]
-    hi = max(b.high for b in seg)
-    for i in range(len(seg) - 1, -1, -1):
-        if seg[i].high >= hi - 1e-6:
-            return (len(seg) - 1 - i) / window
-    return 1.0
-
-
-def limit_up_count(bars: list[Bar], window: int = 20) -> float:
-    """近 N 日涨停次数（需 bars 携带 limit_up）。"""
-    seg = bars[-window:]
-    return float(sum(1 for b in seg if b.limit_up and b.close >= b.limit_up - 1e-6))
-
-
-def gap(bars: list[Bar]) -> float | None:
-    """跳空缺口：(open_t - close_{t-1}) / close_{t-1}。"""
-    if len(bars) < 2:
-        return None
-    pc = bars[-2].close
-    return (bars[-1].open - pc) / pc if pc else None
-
-
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # 注册表
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 
 class FactorLibrary:
-    """因子注册表：名称 -> 计算函数。
+    """因子注册表：名称 -> 计算函数（标量版，吃 ``list[Bar]``）。
 
-    使用统一签名 ``fn(bars) -> float | None``，便于批量计算与中性化。
+    因子定义来自 :data:`aq.factors.vlib.FACTOR_SPECS`，本类只做适配。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, names: list[str] | None = None) -> None:
+        self._specs = [s for s in FACTOR_SPECS if names is None or s.name in set(names)]
         self._factors: dict[str, FactorFn] = {}
-        self._directions: dict[str, int] = {}  # +1 越大越好，-1 越小越好
-        self._register_defaults()
+        self._directions: dict[str, int] = {}
+        self._groups: dict[str, str] = {}
+        self._descs: dict[str, str] = {}
+        self.float_shares: dict[str, float] = {}  # symbol -> 流通股本（换手率因子用）
+        self._register()
 
-    def register(self, name: str, fn: FactorFn, direction: int = 1) -> None:
-        self._factors[name] = fn
-        self._directions[name] = direction
+    def _register(self) -> None:
+        for spec in self._specs:
+            self._factors[spec.name] = self._make_fn(spec.name)
+            self._directions[spec.name] = spec.direction
+            self._groups[spec.name] = spec.group
+            self._descs[spec.name] = spec.desc
 
-    def _register_defaults(self) -> None:
-        reg = self.register
-        reg("momentum_20", lambda b: momentum(b, 20))
-        reg("reversal_5", lambda b: reversal(b, 5))
-        reg("volatility_20", lambda b: volatility(b, 20), direction=-1)
-        reg("ma_bias_20", lambda b: ma_bias(b, 20))
-        reg("ma_cross_5_20", lambda b: ma_cross(b, 5, 20))
-        reg("volume_ratio", lambda b: volume_ratio(b, 20))
-        reg("turnover_change", lambda b: turnover_change(b, 5, 20))
-        reg("days_since_high", lambda b: days_since_high(b, 60), direction=-1)
-        reg("limit_up_count", lambda b: limit_up_count(b, 20))
-        reg("gap", lambda b: gap(b))
+    def _make_fn(self, name: str) -> FactorFn:
+        spec = SPEC_BY_NAME[name]
+
+        def fn(bars: list[Bar]) -> float | None:
+            if not bars:
+                return None
+            df = bars_to_frame(bars)
+            if df.empty:
+                return None
+            try:
+                series = spec.fn(df)
+            except Exception:  # noqa: BLE001
+                return None
+            if series is None or len(series) == 0:
+                return None
+            return _last(np.asarray(series, dtype="float64")[-1])
+
+        fn.__name__ = f"factor_{name}"
+        return fn
 
     # ------------------------------------------------------------------ API
+    def register(self, name: str, fn: FactorFn, direction: int = 1, group: str = "自定义") -> None:
+        """注册自定义因子（会覆盖同名内置因子）。"""
+        self._factors[name] = fn
+        self._directions[name] = direction
+        self._groups[name] = group
+        self._descs[name] = group
+
     @property
     def names(self) -> list[str]:
-        return list(self._factors)
+        return [s.name for s in self._specs]
+
+    @property
+    def specs(self):
+        return list(self._specs)
 
     def direction(self, name: str) -> int:
-        return self._directions.get(name, 1)
+        return self._directions.get(normalize_name(name), 1)
 
-    def compute(self, symbol: str, bars: list[Bar]) -> dict[str, float | None]:
-        """计算单只股票的全部因子值。"""
+    def group(self, name: str) -> str:
+        return self._groups.get(normalize_name(name), "")
+
+    def desc(self, name: str) -> str:
+        return self._descs.get(normalize_name(name), "")
+
+    def compute(self, symbol: str, bars: list[Bar], float_share: float | None = None) -> dict[str, float | None]:
+        """计算单只股票的全部因子值（取最后一根 bar）。
+
+        需要股本的因子（换手率）在股本缺失时返回 None，不会污染其他因子。
+        """
         out: dict[str, float | None] = {}
-        for name, fn in self._factors.items():
+        if not bars:
+            return {n: None for n in self._factors}
+
+        fs = float_share if float_share is not None else self.float_shares.get(symbol)
+        df = bars_to_frame(bars, float_share=fs)
+
+        for name in self._factors:
+            if name in REQUIRES_SHARES and (not fs or "float_share" not in df):
+                out[name] = None
+                continue
             try:
-                out[name] = fn(bars)
-            except (ValueError, ZeroDivisionError, IndexError):
+                series = SPEC_BY_NAME[name].fn(df)
+                out[name] = _last(np.asarray(series, dtype="float64")[-1])
+            except Exception:  # noqa: BLE001
                 out[name] = None
         return out
 
+    def compute_frame(self, df: pd.DataFrame, names: list[str] | None = None) -> pd.DataFrame:
+        """向量化入口：整段 DataFrame -> 因子矩阵（P2 面板构建用）。"""
+        from aq.factors.vlib import compute_all
 
-def compute_factors(symbol: str, bars: list[Bar], library: FactorLibrary | None = None) -> dict[str, float | None]:
+        return compute_all(df, names)
+
+
+def compute_factors(
+    symbol: str,
+    bars: list[Bar],
+    library: FactorLibrary | None = None,
+    float_share: float | None = None,
+) -> dict[str, float | None]:
     lib = library or FactorLibrary()
-    return lib.compute(symbol, bars)
+    return lib.compute(symbol, bars, float_share=float_share)
+
+
+__all__ = [
+    "FactorLibrary",
+    "compute_factors",
+    "bars_to_frame",
+    "spec_names",
+    "LEGACY_ALIAS",
+    "normalize_name",
+]

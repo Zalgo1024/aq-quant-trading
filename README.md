@@ -31,7 +31,47 @@ python aq/smoke_test.py                          # 应 8/8 通过
 
 # 之后每天增量更新（建议 19:00 后）
 python scripts/update_daily.py --overlap 10
+
+# 7) 因子研究（P2）
+python scripts/factor_research.py                       # 全市场动态池，2019 起
+python scripts/factor_research.py --neutralize          # 行业+市值中性化后再检验
+# 产出：runtime/factor_research/<时间戳>/{summary.csv, ic_ts.parquet, corr.csv, report.md}
 ```
+
+## 因子层（P2）
+
+**27 个纯量价因子**，算法只在 `aq/factors/vlib.py` 实现一次，研究与实盘共用，
+杜绝"回测里有效、上线后算出另一个值"。
+
+| 组 | 因子 |
+|---|---|
+| 动量 | `mom_20` `mom_60` `mom_120` `mom_60_vol_adj` |
+| 反转 | `rev_5` |
+| 风险 | `vol_20` `vol_60` `dvol_20` `mdd_20` `skew_20` `hl_range_20` |
+| 趋势 | `ma_bias_20` `ma_bias_60` `ma_cross_5_20` `rsi_14` `stoch_pos_20` |
+| 量能 | `vol_ratio` `turnover_chg` `amihud_20` `amount_log_20` `up_down_vol_20` `vol_price_corr_20` `turn_rate_20` |
+| 结构 | `days_since_high_60` `limit_up_cnt_20` `gap` `intraday_ret` |
+
+工具链：
+
+| 模块 | 作用 |
+|---|---|
+| `aq/factors/vlib.py` | 向量化因子内核（**唯一权威实现**）+ 先验方向 |
+| `aq/factors/panel.py` | 因子面板：全市场流式构建 + 前瞻收益对齐 + 可交易标记 |
+| `aq/factors/neutralize.py` | 行业 + 市值中性化（FWL 定理全表向量化） |
+| `aq/factors/ic.py` | 自研 IC 检验：IC / RankIC / ICIR / **Newey-West t** / 分位收益 / 衰减 / 换手 |
+| `scripts/factor_research.py` | 一键：建面板 → 中性化 → 逐因子检验 → 去冗余 → 出报告 |
+
+两个容易踩的坑，代码里已处理：
+
+1. **一字板不可交易**：次日停牌 / 一字涨停（买不进）/ 一字跌停（卖不出）都打上
+   `t1_tradable=False`，IC 检验自动剔除，否则会算出"买一字板"的假 alpha。
+2. **重叠持有期的高估**：持有 5 天时，相邻两天的 IC 样本高度重叠，IC 序列自相关，
+   普通 t 检验会系统性高估显著性。因此 t 值默认做 **Newey-West 修正**。
+
+打分权重支持两种来源（`config/*.yaml` 的 `model.weight_source`）：
+`prior`（内置先验）或 `ic`（读最近一次因子研究的 RankICIR 自动定权，
+符号直接取实测 IC 方向）。找不到 IC 结果时静默降级为先验，不会让线上流程崩掉。
 
 ## 数据资产（`data_cache/`，P1 产出）
 

@@ -3,6 +3,8 @@ import type {
   AccountInfo,
   Anomaly,
   BacktestResponse,
+  FactorCorr,
+  FactorIcSeries,
   FactorMeta,
   HealthInfo,
   MarketOverview,
@@ -30,7 +32,14 @@ export const api = {
 
   signals: (top = 20) => http.get<Signal[]>('/signals', { params: { top } }).then((r) => r.data),
   factorAnalysis: () =>
-    http.get<{ factors: FactorMeta[]; note: string }>('/factor/analysis').then((r) => r.data),
+    http
+      .get<{ factors: FactorMeta[]; meta: Record<string, unknown>; note: string; generated_at?: string }>(
+        '/factor/analysis',
+      )
+      .then((r) => r.data),
+  factorIcTs: (factors = '') =>
+    http.get<FactorIcSeries>('/factor/ic_ts', { params: { factors } }).then((r) => r.data),
+  factorCorr: () => http.get<FactorCorr>('/factor/corr').then((r) => r.data),
   anomaly: () => http.get<Anomaly[]>('/anomaly').then((r) => r.data),
   account: () => http.get<AccountInfo>('/account').then((r) => r.data),
 
