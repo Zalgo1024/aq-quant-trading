@@ -332,11 +332,24 @@ def t_api() -> None:
     r = client.get(f"/api/stock/{code}/prediction")
     assert r.status_code == 200, r.text
 
-    r = client.post("/api/backtest", json={"start": "2024-01-01", "end": "2024-09-30", "top_k": 5})
+    # ⚠️ top_k 不能小于 1/single_stock_max：每只目标权重 = 1/top_k，
+    # top_k=5 意味着每只 20% > 单票上限 10%，于是**所有买单必然被拒**，
+    # 回测跑得完、曲线看着正常，但仓位恒为 0 —— 这条测试曾经就这样
+    # "通过"了很久，因为它只检查 run_id 存在。单票上限 10% → 至少 10 只，
+    # 取 20 留余量。
+    r = client.post("/api/backtest", json={"start": "2024-01-01", "end": "2024-09-30", "top_k": 20})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["run_id"], "no run_id"
     assert "metrics" in body
+
+    # 断言它**真的买进去了**：只验证流程跑通会放过"什么都没做"的回测
+    diag = body.get("diagnostics") or {}
+    expo = diag.get("avg_exposure")
+    assert expo is not None, "接口未返回 diagnostics，无法判断回测是否真的执行"
+    assert expo > 0.5, (
+        f"回测跑完但平均仓位只有 {expo:.1%}，订单多半被风控全拒 "
+        f"（拒单原因：{diag.get('reject_reasons')}）—— 这条测试等于没验证")
 
     r = client.get(f"/api/backtest/{body['run_id']}")
     assert r.status_code == 200
@@ -367,6 +380,75 @@ def t_live_shell() -> None:
 
 
 # ==========================================================================
+# 9. 防过拟合统计（CSCV / PBO / DSR）的**标定**
+# ==========================================================================
+
+
+def t_cscv() -> None:
+    """用已知答案的模拟数据标定统计模块。
+
+    为什么这一项不能省
+    ------------------
+    PBO 算错是**静默的**：公式里相对秩 ρ 的方向搞反之后，程序照跑、
+    数字照出，只是"真有优势的配置被判成 PBO=1.0、纯噪声反倒只有 0.88"。
+    开发这一层时就真踩了这个坑，所以必须把"零假设下 PBO 应 ≈0.5、
+    有真信号时应显著低于 0.5"钉成断言，否则下次重构还会再犯。
+    """
+    import numpy as np
+    import pandas as pd
+    from statistics import NormalDist
+
+    from aq.backtest import cscv as C
+
+    T, N, S = 1000, 4, 10
+    rng = np.random.default_rng(99)
+
+    def avg_pbo(nrep: int, drift: float = 0.0) -> float:
+        out = []
+        for _ in range(nrep):
+            X = pd.DataFrame(rng.normal(0, 0.01, (T, N)))
+            if drift:
+                X[0] = X[0] + drift
+            out.append(C.probability_of_backtest_overfitting(
+                X, n_subperiods=S)["pbo"])
+        return float(np.mean(out))
+
+    # (a) 零假设：PBO 是对**数据生成过程**的期望 0.5，单次数据集会有很大
+    #     离散，所以必须在多个随机样本上平均后断言
+    p0 = avg_pbo(30)
+    assert 0.35 <= p0 <= 0.65, f"零假设下 PBO 应≈0.5，实际 {p0:.3f}"
+
+    # (b) 有真信号：一个配置持续跑赢 → 挑参应当可复现 → PBO 显著低
+    p1 = avg_pbo(30, drift=0.0012)
+    assert p1 < 0.25, f"有真信号时 PBO 应显著低于 0.5，实际 {p1:.3f}"
+
+    # (c) DSR：N=1（不做多重检验校正）时必须退化成 Φ(t)
+    r = rng.normal(0.0009, 0.01, T)
+    d1 = C.deflated_sharpe(r, n_trials=1)
+    want = NormalDist().cdf(d1["t_stat"])
+    assert abs(d1["deflated_sharpe"] - want) < 1e-6, (
+        f"N=1 时 DSR 应等于 Φ(t)：{d1['deflated_sharpe']} vs {want}")
+    assert d1["deflated_sharpe"] > 0.95, "t=4.7 的强信号在 N=1 下必须显著"
+
+    # (d) 多重检验门槛 SR0 随试错次数单调上升
+    prev = -1.0
+    for n in (2, 5, 20, 100, 500):
+        cur = C.deflated_sharpe(r, n_trials=n)["sr_threshold"]
+        assert cur > prev, f"SR0 应随 N 单调增：N={n} 时 {cur} <= {prev}"
+        prev = cur
+
+    # (e) 有效独立试验数：完全相关 → 1；独立 → ≈N
+    X = pd.DataFrame(rng.normal(0, 0.01, (T, 4)))
+    X[1] = X[0]
+    X[2] = X[0]
+    X[3] = X[0]
+    ne = C.effective_trials(X)["n_eff"]
+    assert abs(ne - 1.0) < 0.05, f"完全相关时 N_eff 应≈1，实际 {ne}"
+    ne2 = C.effective_trials(pd.DataFrame(rng.normal(0, 0.01, (T, 4))))["n_eff"]
+    assert 3.0 <= ne2 <= 5.0, f"独立时 N_eff 应≈4，实际 {ne2}"
+
+
+# ==========================================================================
 # main
 # ==========================================================================
 
@@ -384,6 +466,7 @@ def main() -> int:
     check("6. 回测引擎全流程 + 绩效指标", t_backtest)
     check("7. API 端点（health/market/signals/backtest…）", t_api)
     check("8. 实盘适配器壳正确报错", t_live_shell)
+    check("9. 防过拟合统计标定（PBO 零假设≈0.5 / DSR / N_eff）", t_cscv)
 
     print("-" * 70)
     passed = sum(1 for _, ok, _ in _results if ok)

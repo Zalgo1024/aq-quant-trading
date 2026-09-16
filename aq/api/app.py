@@ -462,6 +462,11 @@ def run_backtest_api(req: BacktestRequest) -> dict:
         "equity": [p.model_dump(mode="json") for p in result.equity],
         "drawdown": [p.model_dump(mode="json") for p in result.drawdown],
         "trade_count": len(result.trades),
+        # 过程诊断（平均仓位/持仓数/拒单原因）。**必须随接口返回**：
+        # 只看 metrics 无法判断回测是否真的按预期执行 —— 曾经有一条
+        # 冒烟测试"通过"了很久，实际是 top_k=5 与单票上限 10% 冲突，
+        # 890 笔订单全被拒、仓位恒为 0，而收益曲线看起来完全正常。
+        "diagnostics": result.diagnostics,
     }
 
 
