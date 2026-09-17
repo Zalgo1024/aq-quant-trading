@@ -566,6 +566,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"       {'配置':<18s}{'原始年化夏普':>14s}{'扣 rf 后':>12s}")
     for c, a, b in _cmp:
         print(f"       {c:<18s}{a:>14.4f}{b:>12.4f}")
+    # 超额口径（第 5 步）要用**未扣 rf** 的原始收益矩阵，先留一份再覆盖 R。
+    R_raw = R
     R = Rn
 
     # ---- 2b) 配置相关性
@@ -622,9 +624,19 @@ def main(argv: list[str] | None = None) -> int:
         B = pd.DataFrame(bench_series).dropna(how="any")
         common = R.index.intersection(B.index)
         if len(common) > 100:
-            E = R.loc[common] - B.loc[common]
+            # ⚠️ 口径修正（2026-09-17）：这里必须用**未扣 rf** 的 R_raw。
+            # 此前用的是 R —— 而上面第 556~569 行已把 R 换成 Rn = R - rf_daily，
+            # 于是算出来的是
+            #     E = (策略 - rf) - 基准 = 策略 - 基准 - rf
+            # 比"策略 - 基准"多扣了一份 rf（≈2%/年），系统性低估超额收益，
+            # 也与本段自己的打印"策略日收益 − 基准日收益"不符。
+            # 注：rf 是共模项，减去它不改变配置之间的**相对**排序，
+            # 所以 PBO 几乎不变（0.2235→0.2258），但年化夏普 / t / DSR 会整体上移。
+            E = R_raw.loc[common] - B.loc[common]
             print("\n" + "=" * 120)
             print("超额口径（策略日收益 − 基准日收益，剥离市场 beta）")
+            print("      两边都是**原始收益**、不扣 rf —— "
+                  "要问的是'能不能跑赢基准'，不是'能不能跑赢现金'")
             print("=" * 120)
             r = C.probability_of_backtest_overfitting(E, n_subperiods=main_S)
             if "error" not in r:
@@ -699,6 +711,11 @@ def main(argv: list[str] | None = None) -> int:
         "trading_days_per_year": TRADING_DAYS_PER_YEAR,
         "pbo_excess": pbo_ex,
         "dsr_excess": dsr_ex,
+        # 超额口径的**自描述标记**：旧结果（2026-09-17 之前）会缺这个字段，
+        # 那正是"这份 pbo_excess/dsr_excess 被双扣了一份 rf、不可引用"的信号。
+        # 与 configs[].score_neutralize 用的是同一个思路：口径写在产物里，不靠人记。
+        "excess_caliber": (
+            "raw_minus_benchmark_no_rf" if pbo_ex is not None else None),
         "verdict": {
             "pbo": main_pbo["pbo"],
             "t_stat": t,
