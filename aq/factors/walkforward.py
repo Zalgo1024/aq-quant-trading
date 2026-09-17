@@ -224,6 +224,24 @@ class WalkForwardWeighter:
             "min_icir_ratio": getattr(m, "ic_min_icir_ratio", 0.5),
         }
 
+        # ---- 成本感知定权（B1）在 walk-forward 下**主动拒绝** ----
+        # 原因：这里的 summary 由 `rolling_ic_summary` 从 ic_ts.parquet 的
+        # **日 IC 序列**汇总而来，**不含 turnover 列**。而 turnover 必须与 IC
+        # 用同一个回看窗口估计；若拿 summary.csv 的全样本换手去定窗口内权重，
+        # 就是前视 —— 恰恰是 walk-forward 存在的意义所在。
+        #
+        # 宁可不支持，也不能悄悄用静态换手冒充"滚动验收"（本项目已经吃过
+        # 两次"配置看起来能调、其实调不动 / 静默降级"的亏）。
+        # 补法：给 factor_research 增加逐日换手序列并写进 ic_ts.parquet。
+        _cp = float(getattr(m, "ic_cost_penalty", 0.0) or 0.0)
+        if _cp:
+            raise NotImplementedError(
+                "ic_cost_penalty != 0 暂不支持 weight_source='ic_wf'：\n"
+                "  滚动窗口的 summary 没有 turnover 列，无法与 IC 保持同一窗口口径；\n"
+                "  用全样本换手会引入前视，等于把 walk-forward 的意义抹掉。\n"
+                "  请先用 weight_source='ic'（静态定权）做第一轮筛查，\n"
+                "  或先给 ic_ts.parquet 补一列逐日换手序列。")
+
         # 只保留中性化变体里存在的因子列（其余是别的变体带来的）
         self.factor_cols = sorted({c[: -len("__rankic")]
                                    for c in ic_ts.columns if c.endswith("__rankic")})

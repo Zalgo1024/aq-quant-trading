@@ -106,6 +106,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="未中性化变体目录（如 runtime/factor_research/full_raw）。"
                         "walk-forward 的'中性化抗性门控'需要它做分母，"
                         "不传则该门控恒真")
+    # 成本感知定权（B1，2026-09-17 新增）。**必须进缓存 key**，理由同上面两项：
+    # 不写进 label 的话，`--ic-cost-penalty 1` 会命中 penalty=0 的同名缓存，
+    # 输出"现状权重"的收益序列却贴上"成本感知"的标签。
+    p.add_argument("--ic-cost-penalty", dest="ic_cost_penalty", type=float,
+                   default=0.0,
+                   help="成本感知定权指数：定权值 = |RankICIR| / turnover**p。"
+                        "0=现状（默认，逐字不变）；1=完全按净口径。"
+                        "仅支持 weight_source='ic'，ic_wf 会主动报错")
 
     # --- 配置网格 ---
     p.add_argument("--hold-list", default="1,5,10,20",
@@ -206,17 +214,23 @@ def build_configs(args) -> list[dict]:
     neu = bool(getattr(args, "score_neutralize", True))
     npre = "neu_" if neu else ""
 
+    # 成本感知定权（B1）同理，也必须进缓存 key 与 label。默认 0.0（= 现状），
+    # 此时 label **逐字不变**，既有缓存与已发布结论继续有效；非 0 才加 `cp{p}_`。
+    cpen = float(getattr(args, "ic_cost_penalty", 0.0) or 0.0)
+    cpre = "" if cpen == 0.0 else f"cp{cpen:g}_"
+
     cfgs: list[dict] = []
     seen: set[tuple] = set()
 
     def add(w, h, t):
-        key = (w, h, float(t), fset, neu)
+        key = (w, h, float(t), fset, neu, cpen)
         if key in seen:
             return
         seen.add(key)
         cfgs.append({"weight_source": w, "hold": h, "turnover": float(t),
                      "factor_set": fset, "score_neutralize": neu,
-                     "label": f"{prefix}{npre}w{w}_h{h}d_t{t:g}"})
+                     "ic_cost_penalty": cpen,
+                     "label": f"{prefix}{npre}{cpre}w{w}_h{h}d_t{t:g}"})
 
     if args.grid in ("both", "turnover"):
         for t in turnovers:
@@ -273,6 +287,8 @@ def run_one(cfg, spec: dict, cache_dir: Path, args) -> tuple[pd.Series, dict, pd
     # 打分口径也必须在**构造引擎之前**写进 cfg —— 面板是在
     # BacktestEngine.__init__ 里 build 的，事后再改 cfg 不会生效。
     cfg.model.score_neutralize = bool(spec.get("score_neutralize", True))
+    # 成本感知定权（B1）同理，也必须在构造引擎之前写进 cfg。
+    cfg.model.ic_cost_penalty = float(spec.get("ic_cost_penalty", 0.0) or 0.0)
     cfg.risk.liquidity_min_turnover = spec["turnover"]
     # ⚠️ rebalance_days 必须在**构造引擎之前**写进 cfg：
     # 它是在 BacktestEngine.__init__ 里被 _parse_rebalance_days 解析的，
@@ -311,6 +327,7 @@ def run_one(cfg, spec: dict, cache_dir: Path, args) -> tuple[pd.Series, dict, pd
         "factor_set": spec.get("factor_set", "all"),
         "factor_include": list(FACTOR_SETS.get(spec.get("factor_set", "all"), [])),
         "score_neutralize": bool(spec.get("score_neutralize", True)),
+        "ic_cost_penalty": float(spec.get("ic_cost_penalty", 0.0) or 0.0),
         "hold_days": spec["hold"],
         "risk_turnover": spec["turnover"],
         "total_return": getattr(m, "total_return", None),
@@ -473,6 +490,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg.model.ic_weight_mode = "icir"
     cfg.model.ic_select = True
     cfg.model.factor_include = list(FACTOR_SETS[args.factor_set])
+    cfg.model.ic_cost_penalty = float(args.ic_cost_penalty or 0.0)
     if args.ic_raw:
         cfg.model.ic_raw_summary_path = str(Path(args.ic_raw) / "summary.csv")
     cfg.model.wf_window = int(args.wf_window)
@@ -491,6 +509,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("[打分口径] raw（不中性化，旧口径）—— 缓存无前缀，"
               "**仅用于 A/B 复盘，不要用它下结论**")
+    if args.ic_cost_penalty:
+        print(f"[定权口径] 成本感知：|RankICIR| / turnover**{args.ic_cost_penalty:g}"
+              f" —— label 前缀 cp{args.ic_cost_penalty:g}_"
+              f"（penalty!=0 时 ic_wf 会主动报错，见 walkforward.py）")
     print(f"[缓存] {cache_dir}")
 
     specs = build_configs(args)

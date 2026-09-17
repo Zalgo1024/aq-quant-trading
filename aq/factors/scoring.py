@@ -115,6 +115,8 @@ def build_scorer(cfg=None, library: "FactorLibrary | None" = None) -> "FactorSco
             min_icir_ratio=getattr(m, "ic_min_icir_ratio", 0.5),
             # 因子子集（研究用 ablation）。空列表 -> None -> 走原逻辑。
             factor_include=getattr(m, "factor_include", None) or None,
+            # 成本感知定权（B1）。0.0 = 历史行为，逐字不变。
+            cost_penalty=getattr(m, "ic_cost_penalty", 0.0),
         )
         print(f"[打分] 已加载 IC 权重 <- {Path(p).parent.name}"
               f"（{len(scorer.active_factors())} 个因子有权重，来源 {scorer.ic_source}）")
@@ -203,6 +205,7 @@ class FactorScorer:
         corr_threshold: float = 0.85,
         min_icir_ratio: float = 0.5,
         factor_include: "list[str] | None" = None,
+        cost_penalty: float = 0.0,
     ) -> dict[str, float]:
         """用实测 IC 结果自动定权。
 
@@ -229,6 +232,17 @@ class FactorScorer:
             因子子集。非空时**只有**列出的因子参与定权，且改用一套为该场景
             定制的口径：跳过组内 min-max、跳过单因子 cap，直接按 |v| 比例分配。
             子集内权重全零时**抛错**（不退化为全因子等权）。
+        cost_penalty
+            成本感知定权的惩罚指数：定权值由 ``|v|`` 改为
+            ``|v| / turnover ** cost_penalty``，``turnover`` 取自 summary 的
+            ``turnover`` 列（因子自身的截面排序换手）。
+
+            ``0.0``（默认）表示**逐字保持历史行为** —— 这一步是硬要求，
+            否则磁盘上的既有缓存与已发布的结论会静默失效。
+
+            ⚠️ ``turnover`` 是**样本内**估计量，用它定权引入了一个新自由度。
+            验收必须走 walk-forward 定权（``weight_source="ic_wf"``），
+            不能拿全样本权重回测后就下结论。
         """
         import pandas as pd
 
@@ -292,6 +306,25 @@ class FactorScorer:
                 selected = set(keep)
 
         # ---- 强度 -> 权重 ----
+        #
+        # 成本感知定权（B1）：定权值可改为 |v| / turnover ** cost_penalty。
+        # ⚠️ cost_penalty == 0 时下面走的是**逐字保留**的老分支，
+        #    一个浮点都不许变 —— 磁盘上的既有 CSCV 缓存与已发布结论
+        #    都产自这一口径，静默改写会让它们全部失效。
+        _cost_pen = _tofloat(cost_penalty)
+        if not math.isfinite(_cost_pen):
+            _cost_pen = 0.0
+        use_cost = _cost_pen != 0.0
+        turnover_col = None
+        if use_cost:
+            turnover_col = next((c for c in ("turnover", "换手", "turnover_rate")
+                                 if c in df.columns), None)
+            if turnover_col is None:
+                raise ValueError(
+                    "cost_penalty != 0 需要 summary 含换手列（'turnover' / '换手'），"
+                    f"实际列：{list(df.columns)}")
+        n_缺换手 = 0
+
         raw: dict[str, float] = {}
         for name, row in df.iterrows():
             nm = normalize_name(str(name))
@@ -308,7 +341,23 @@ class FactorScorer:
             if abs(ic) < min_abs_ic or (math.isfinite(_tofloat(row.get(p_col))) and _tofloat(row.get(p_col)) > max_p):
                 raw[nm] = 0.0
                 continue
-            raw[nm] = abs(v)
+            if not use_cost:
+                raw[nm] = abs(v)
+                continue
+            tov = _tofloat(row.get(turnover_col))
+            if not math.isfinite(tov) or tov <= 0:
+                # 缺换手就无法评估成本。**不可以**当成"零惩罚"放行 ——
+                # 那等于偷偷让一个可能极贵的因子拿满权重。统一按最保守处理：
+                # 本轮不给它权重，并计数后统一告警。
+                n_缺换手 += 1
+                raw[nm] = 0.0
+                continue
+            raw[nm] = abs(v) / (tov ** _cost_pen)
+
+        if n_缺换手:
+            print(f"[打分][注意] {n_缺换手} 个因子因缺/非法 turnover 被排除出定权"
+                  f"（cost_penalty={_cost_pen:g}）—— "
+                  f"这不是【零惩罚】，是【无法评估成本故不给权重】。")
 
         for n in self.weights:
             raw.setdefault(n, 0.0)
@@ -425,7 +474,8 @@ class FactorScorer:
         self.use_ic_weight = True
         self._ic_source = (f"ic:{mode}"
                            + ("+select" if selected is not None else "")
-                           + ("+subset" if subset_mode else ""))
+                           + ("+subset" if subset_mode else "")
+                           + (f"+cost{_cost_pen:g}" if use_cost else ""))
         self._normalize_weights()
         if subset_mode:
             # 子集模式必须打出来：这是"标签和内容是否一致"的唯一现场证据。

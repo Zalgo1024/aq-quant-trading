@@ -62,6 +62,13 @@ model:
   # （低 PB 会在全市场口径下退化为"买建筑+钢铁"）。
   # 置 false 仅用于 A/B 复盘对照，不要用来下结论。
   score_neutralize: true
+  # 成本感知定权（B1）：定权值 = |RankICIR| / turnover ** ic_cost_penalty。
+  # 0.0 = 现状（逐字不变）；1.0 = 完全按净口径。
+  # 动机：原口径不看换手，权重恰好压在换手 0.5~0.8 的量价因子上，
+  # 而组合加权平均换手 0.2641 正是"成本吃掉 alpha"的直接来源。
+  # 只支持 weight_source="ic"（静态定权）；"ic_wf" 会主动报错，
+  # 因为滚动窗口的 summary 没有 turnover 列、无法保证同一窗口口径。
+  ic_cost_penalty: 0.0
 
 frontend:
   theme: dark
