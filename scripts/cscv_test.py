@@ -91,6 +91,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--tag", default="main", help="结果目录后缀，区分不同实验")
     p.add_argument("--factor-set", default="all", choices=list(FACTOR_SETS),
                    help="因子子集：all=全因子（原口径）；valuation=bp/ep/sp 独立上场")
+    # 打分口径（2026-09-17 新增）。**必须进缓存 key**，理由与 --factor-set 完全相同：
+    # 修复 model.score_neutralize 之前跑出来的收益序列是 **raw 口径**的，
+    # 若不把口径写进 label，重跑会命中旧缓存、把 raw 的结果贴上"已中性化"的标签。
+    # 旧缓存（liquid_main / liquid_v2 / liquid_wf / hs300_main / liquid_val_only）
+    # 全部是 raw 口径 —— 这正是要让它们失效的对象。
+    p.add_argument("--score-neutralize", dest="score_neutralize",
+                   action="store_true", default=True,
+                   help="打分前做行业+市值中性化（默认，与 IC 估计口径一致）")
+    p.add_argument("--no-score-neutralize", dest="score_neutralize",
+                   action="store_false",
+                   help="打分前不做中性化（旧 raw 口径，仅用于 A/B 复盘对照）")
     p.add_argument("--ic-raw", default="",
                    help="未中性化变体目录（如 runtime/factor_research/full_raw）。"
                         "walk-forward 的'中性化抗性门控'需要它做分母，"
@@ -189,17 +200,23 @@ def build_configs(args) -> list[dict]:
     fset = str(getattr(args, "factor_set", "all") or "all")
     prefix = "" if fset == "all" else f"f{fset}_"
 
+    # 打分口径同理（前缀法）。**默认 neu（中性化）加前缀，raw 不加** ——
+    # 因为磁盘上已有的缓存全部是 raw 口径产出的，给 raw 保留原名才是语义正确的；
+    # 反过来做会让旧缓存被当成"中性化结果"复用，是本项目最危险的一类错误。
+    neu = bool(getattr(args, "score_neutralize", True))
+    npre = "neu_" if neu else ""
+
     cfgs: list[dict] = []
     seen: set[tuple] = set()
 
     def add(w, h, t):
-        key = (w, h, float(t), fset)
+        key = (w, h, float(t), fset, neu)
         if key in seen:
             return
         seen.add(key)
         cfgs.append({"weight_source": w, "hold": h, "turnover": float(t),
-                     "factor_set": fset,
-                     "label": f"{prefix}w{w}_h{h}d_t{t:g}"})
+                     "factor_set": fset, "score_neutralize": neu,
+                     "label": f"{prefix}{npre}w{w}_h{h}d_t{t:g}"})
 
     if args.grid in ("both", "turnover"):
         for t in turnovers:
@@ -253,6 +270,9 @@ def run_one(cfg, spec: dict, cache_dir: Path, args) -> tuple[pd.Series, dict, pd
     # 里 build 的，run() 之后再改 cfg 对已建好的 scorer 无效。
     fset = str(spec.get("factor_set", "all") or "all")
     cfg.model.factor_include = list(FACTOR_SETS.get(fset, []))
+    # 打分口径也必须在**构造引擎之前**写进 cfg —— 面板是在
+    # BacktestEngine.__init__ 里 build 的，事后再改 cfg 不会生效。
+    cfg.model.score_neutralize = bool(spec.get("score_neutralize", True))
     cfg.risk.liquidity_min_turnover = spec["turnover"]
     # ⚠️ rebalance_days 必须在**构造引擎之前**写进 cfg：
     # 它是在 BacktestEngine.__init__ 里被 _parse_rebalance_days 解析的，
@@ -290,6 +310,7 @@ def run_one(cfg, spec: dict, cache_dir: Path, args) -> tuple[pd.Series, dict, pd
         "weight_source": spec["weight_source"],
         "factor_set": spec.get("factor_set", "all"),
         "factor_include": list(FACTOR_SETS.get(spec.get("factor_set", "all"), [])),
+        "score_neutralize": bool(spec.get("score_neutralize", True)),
         "hold_days": spec["hold"],
         "risk_turnover": spec["turnover"],
         "total_return": getattr(m, "total_return", None),
@@ -465,6 +486,11 @@ def main(argv: list[str] | None = None) -> int:
               f"（子集口径：按 |RankICIR| 比例分配，跳过 min-max 与单因子 cap）")
     else:
         print("[因子集] all —— 全因子 + 组内 min-max + 单因子 cap（原口径）")
+    if args.score_neutralize:
+        print("[打分口径] 行业+市值中性化（与 IC 估计一致）—— 缓存前缀 neu_")
+    else:
+        print("[打分口径] raw（不中性化，旧口径）—— 缓存无前缀，"
+              "**仅用于 A/B 复盘，不要用它下结论**")
     print(f"[缓存] {cache_dir}")
 
     specs = build_configs(args)
