@@ -1,7 +1,22 @@
 # A 股 AI 量化交易系统（aq_project）
 
 > 仅面向 **A 股股票**；**模拟优先（paper）**，实盘接口预留；本地单机部署。
-> 本仓库为可运行骨架：数据层 / 因子层 / 模型层 / 组合风控 / 执行层（SimGateway）/ 回测 / API / 前端。
+> 本仓库为可运行骨架：数据层 / 因子层 / 模型层（占位，见下）/ 组合风控 / 执行层（SimGateway）/ 回测 / API / 前端。
+
+## ⚠️ 先说结论（省得你读完才发现）
+
+本仓库**工程链路完整**（数据落盘、撮合、风控、回测、CSCV 防过拟合框架全部跑通，
+且有分位/单调性/成本敏感性等检验工具），但**当前策略层已被统计证伪**：
+
+| 路线 | 结果 | 判据 |
+|---|---|---|
+| 27 个量价因子 + IC 加权 | **无优势** | 6/6 配置 alpha 全负；最优 t = 0.128 |
+| 3 个估值因子独立上场（raw 口径） | **亏钱** | 6/6 配置亏损；最优 t = −0.211 |
+| 小市值效应（2019–2026） | **不显著** | ln_mktcap t = −1.43 |
+
+**所以：这个仓库的价值在"工程 + 检验框架"，不在"能赚钱的策略"。** 把它当成一个
+诚实的负面结果复现包 + 一套防自欺的回测工具，比当成策略源码更有用。
+详细数据与口径见 [研究结论](#研究结论重要)。
 
 ## 快速开始
 
@@ -38,10 +53,10 @@ python scripts/factor_research.py --neutralize          # 行业+市值中性化
 # 产出：runtime/factor_research/<时间戳>/{summary.csv, ic_ts.parquet, corr.csv, report.md}
 ```
 
-## 因子层（P2）
+## 因子层（P2 / P2.5）
 
-**27 个纯量价因子**，算法只在 `aq/factors/vlib.py` 实现一次，研究与实盘共用，
-杜绝"回测里有效、上线后算出另一个值"。
+**31 个因子** = 27 个量价 + 1 个规模 + 3 个估值。算法只在 `aq/factors/vlib.py` 实现一次，
+研究与实盘共用，杜绝"回测里有效、上线后算出另一个值"。
 
 | 组 | 因子 |
 |---|---|
@@ -51,6 +66,14 @@ python scripts/factor_research.py --neutralize          # 行业+市值中性化
 | 趋势 | `ma_bias_20` `ma_bias_60` `ma_cross_5_20` `rsi_14` `stoch_pos_20` |
 | 量能 | `vol_ratio` `turnover_chg` `amihud_20` `amount_log_20` `up_down_vol_20` `vol_price_corr_20` `turn_rate_20` |
 | 结构 | `days_since_high_60` `limit_up_cnt_20` `gap` `intraday_ret` |
+| 规模 | `ln_mktcap` |
+| 估值 | `bp` `ep` `sp` |
+
+> **方向表是实测校准过的，不是教科书抄来的。** 初版照搬美股经典因子库，实测发现
+> **27 个里有 13 个在 A 股是反的**（按错误方向打分时，"策略最想买的前 20%"年化仅
+> 10.95%，而"最想避的后 20%"年化 16.52%——即在系统性反向选股）。方向已按
+> **中性化后的逐日横截面 RankIC 符号**修正，一致性 27/27。
+> 定方向的方法论坑（不要用分组平均收益、不要用 RAW 数据）写在 `vlib.py` 的注释里。
 
 工具链：
 
@@ -60,7 +83,10 @@ python scripts/factor_research.py --neutralize          # 行业+市值中性化
 | `aq/factors/panel.py` | 因子面板：全市场流式构建 + 前瞻收益对齐 + 可交易标记 |
 | `aq/factors/neutralize.py` | 行业 + 市值中性化（FWL 定理全表向量化） |
 | `aq/factors/ic.py` | 自研 IC 检验：IC / RankIC / ICIR / **Newey-West t** / 分位收益 / 衰减 / 换手 |
+| `aq/factors/walkforward.py` | 滚动窗口 walk-forward 选参（避免用未来数据挑参数） |
+| `aq/backtest/cscv.py` | **CSCV / PBO / Deflated Sharpe** —— 防过拟合三件套 |
 | `scripts/factor_research.py` | 一键：建面板 → 中性化 → 逐因子检验 → 去冗余 → 出报告 |
+| `scripts/cscv_test.py` | 一键：多配置回测 → CSCV 过拟合概率 → 分年度拆解 |
 
 两个容易踩的坑，代码里已处理：
 
@@ -72,6 +98,69 @@ python scripts/factor_research.py --neutralize          # 行业+市值中性化
 打分权重支持两种来源（`config/*.yaml` 的 `model.weight_source`）：
 `prior`（内置先验）或 `ic`（读最近一次因子研究的 RankICIR 自动定权，
 符号直接取实测 IC 方向）。找不到 IC 结果时静默降级为先验，不会让线上流程崩掉。
+
+`model.factor_include` 可指定**因子子集**（如 `["bp","ep","sp"]`）跑单组实验。
+⚠️ 必须走这个配置项、不能只筛 `summary.csv` —— 打分器的 min-max 归一化会把子集里
+最弱的因子恒压成 0 分且永不复权，直接导致"某因子无效"的伪结论。
+
+## 研究结论（重要）
+
+**口径**：股票池 `universe.index = all` + 上市满 180 天 + 近 20 日日均成交额 ≥ 2e7（下称 liquid 池）；
+起点 2019-01-01（跨越 2019 牛、2020 疫情、2021 抱团、2022 熊、2023–24 震荡、2025–26 反弹）；
+全样本 31 因子。**不使用沪深300 成分池做结论**——它含幸存者偏差。
+
+### 1. 量价因子 + IC 加权：无优势
+
+CSCV v2（31 因子 / liquid / 2019 起）：
+
+| 指标 | 值 | 怎么读 |
+|---|---|---|
+| PBO | 0.121 | 挑参可复现性尚可，**但这单独看是坏消息也可能是好消息，必须配 t 读** |
+| 最优配置 t | **0.128** | 远离显著 |
+| DSR | 0.120 | 扣掉多重比较后 ≈ 0 |
+| alpha | **6/6 配置全负** | 加个基准就能全赢的说法不成立 |
+
+分年度 **4 赚 4 亏**（2019 +21%、2020 −18%、2022 −27%、2024 +36%）→ 严重 regime 依赖，
+不是稳定 alpha。
+
+### 2. 估值因子独立上场（raw 口径）：亏钱
+
+`cscv_liquid_val_only`：6/6 配置亏损，alpha −4.0% ~ −6.3%，**最优 t = −0.211**，
+DSR(N=6) = 0.065。配置间 ρ̄ = 0.984 / N_eff = 1.01 → **6 个配置本质是同一个策略**，
+"多配置都不错"是假的。
+
+### 3. 因子层面：IC 显著 ≠ 能赚钱
+
+| 因子 | RankIC | ICIR | t | 换手 | 多空年化 | q_mono |
+|---|---|---|---|---|---|---|
+| `bp` | +0.0179 | 0.198 | +8.07 | 0.021 | **+6.4%** | 0.842 |
+| `ep` | +0.0120 | 0.171 | +6.73 | 0.019 | **−2.8%** | **−0.018** |
+| `sp` | +0.0108 | 0.158 | +6.53 | 0.015 | +4.2% | 0.842 |
+| `ln_mktcap` | −0.0054 | −0.036 | −1.43 | 0.019 | −13.2% | −0.818 |
+| `gap`（对照） | +0.0206 | +0.402 | +18.0 | **0.795** | +82.6% | +0.98 |
+
+- **`ep` 是"IC 显著但价差不可交易"的教科书案例**（q_mono −0.018：分组收益根本不单调）。
+- 估值因子的决定性优势是**换手极低**（0.015~0.021，量价因子的 1/30~1/50），正打在
+  "交易成本吃掉 alpha"这个瓶颈上；但**幅度太小**（|IC| 仅量价的 1/3~1/4）。
+- IC 加权按 |ICIR| 定权、**不看换手** → 估值三因子在全因子组合里只拿到 **4.5%** 权重。
+
+### 4. 已知缺口：打分口径 ≠ IC 估计口径（正在修）
+
+`neutralize()` 只被 `scripts/factor_research.py`（算 IC）和 `scripts/neutral_diag.py` 调用；
+**`aq/backtest/engine.py` 的打分路径不做中性化**，`score_cross_section` 只做全市场横截面 z-score。
+
+后果：IC 在"行业 + 市值中性化"口径上测，组合却按 **raw** 口径排序 →
+低 PB 在全市场口径下 ≈ "买建筑 + 钢铁"（风控拒单记录：土木工程 515 次、黑色金属 74 次，
+其余行业 0 次）→ **深度价值行业押注**，平均仓位仅 79.7%、平均持仓 16.17/20。
+
+**这是一个真实的 bug 级缺口，不是配置项。**
+
+### 两个读数陷阱（自己踩过，写下来）
+
+1. **PBO 低 ≠ 好消息。** 低 PBO 只说明"挑参可复现"，要配 t 一起读。
+   且配置间 ρ̄ 高时 PBO 天然偏低——PBO 的零假设基准不是固定的 0.5，随候选集上移。
+2. **`cscv_*_returns.csv` 存的是扣 rf 后的超额收益**（`R = Rn`），
+   而 json 里 `configs[].total_return` 是**未扣 rf 的原始收益**，两者差 ≈ `年数 × 2%`。
 
 ## 数据资产（`data_cache/`，P1 产出）
 
@@ -91,18 +180,28 @@ aq_project/
 │  ├─ core/         # 领域模型：Order/Fill/Account/Position/Bar/Signal + 枚举
 │  ├─ config/       # 配置加载（yaml + 环境变量覆盖）
 │  ├─ data/         # 数据层：Provider 抽象 + akshare/tushare/mock 实现 + 存储
-│  ├─ factors/      # 因子计算 / 中性化 / 验证
-│  ├─ models/       # 截面/时序/情绪模型 + 训练与推理
+│  ├─ factors/      # 因子计算 / 中性化 / IC 检验 / walk-forward / 面板
+│  ├─ models/       # ⚠️ 占位骨架：截面/时序/情绪模型 + 训练推理接口，**零调用点**（P3 未做）
 │  ├─ portfolio/    # 组合构建 + 风控引擎
 │  ├─ execution/    # MarketFeed / TradingGateway 抽象 + SimGateway + 实盘 Adapter 壳
-│  ├─ backtest/     # 回测引擎（复用 SimGateway 撮合）
+│  ├─ backtest/     # 回测引擎（复用 SimGateway 撮合）+ CSCV/PBO/DSR 防过拟合
 │  ├─ api/          # FastAPI 服务
 │  └─ smoke_test.py # 自包含端到端冒烟测试
 ├─ config/          # base.yaml / paper.yaml / backtest.yaml / live.example.yaml
+├─ scripts/         # 数据拉取/质检/修复、因子研究、CSCV、分组诊断
 ├─ web/             # React + Vite + ECharts 前端（红涨绿跌、¥）
-├─ docs/            # 技术设计文档、开发计划
+├─ docs/            # 技术设计文档、开发计划、因子研究报告
 └─ sql/             # PostgreSQL/TimescaleDB schema
 ```
+
+### 关于 `aq/models/`：它不是"模型层"，是空壳
+
+`models/base.py`（注册表）+ `cross_section.py` / `time_series.py` / `sentiment.py` 里
+写好了 LightGBM → XGBoost → Ridge 的降级链和训练/推理接口，**但全仓库没有任何调用点**，
+`requirements.txt` 里 ML 依赖也是注释掉的。前端和 API 没有任何路径会走到它。
+
+也就是说：**这个项目的选股完全由因子加权打分决定，ML 部分从未参与过。**
+把它当"预留接口"看可以，当"已实现的模型层"看是错的。
 
 ## 设计要点
 
