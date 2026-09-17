@@ -60,6 +60,7 @@ def neutralize(
     standardize: bool = True,
     inplace: bool = False,
     industry_only: list[str] | None = None,
+    verbose: bool = True,
 ) -> pd.DataFrame:
     """对因子做行业 + 市值中性化，返回带新列的 DataFrame。
 
@@ -71,6 +72,9 @@ def neutralize(
         回归前先截尾，防止极端值主导 β。
     standardize
         残差再做一次截面 z-score，便于后续加权合成。
+    verbose
+        是否打印"缺市值"提示。**逐日调用时必须设 False**——
+        回测打分路径会对 1900+ 个交易日各调一次，否则日志会被刷爆。
     industry_only
         **只做行业中性化、跳过市值中性化**的因子名列表。
 
@@ -95,7 +99,7 @@ def neutralize(
     has_cap = lncap.notna()
 
     n_no_cap = int((~has_cap).sum())
-    if n_no_cap:
+    if n_no_cap and verbose:
         print(f"  [中性化] {n_no_cap:,} 行缺市值 -> 仅做行业中性化")
 
     grp_keys = [out[date_col], out["_ind"]]

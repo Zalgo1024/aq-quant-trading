@@ -57,6 +57,11 @@ model:
   sentiment: llm_api
   top_k: 20
   score_threshold: 0.55
+  # 打分口径中性化（2026-09-17 修）：IC 在「行业+市值中性化」口径上估，
+  # 组合也必须按同一口径排序，否则回测出来的 alpha 是口径错位造成的假象
+  # （低 PB 会在全市场口径下退化为"买建筑+钢铁"）。
+  # 置 false 仅用于 A/B 复盘对照，不要用来下结论。
+  score_neutralize: true
 
 frontend:
   theme: dark

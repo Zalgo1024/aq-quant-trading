@@ -127,6 +127,18 @@ class ModelConfig(BaseModel):
     # ---- P2：因子打分 ----
     # 权重来源："prior"（内置先验）| "ic"（读因子研究实测 IC 自动定权）
     weight_source: str = "prior"
+    # ---- 打分口径中性化（2026-09-17 新增）----
+    # 修的是一个**口径错位**：IC 是在「行业+市值中性化」口径上估的
+    # （factor_research.py --neutralize），但回测打分路径原先**不做中性化**，
+    # 只做全市场横截面 z-score。后果是组合实际在做"raw 口径排序"——
+    # 低 PB 在全市场口径下 ≈ 买建筑 + 钢铁（深度价值行业押注），
+    # 而不是行业内的横截面选股。IC 与组合口径不一致，回测数字就不可信。
+    #
+    # True（推荐）：打分前对全部因子做行业 + 市值中性化，与 IC 估计同口径。
+    # False：保留旧的 raw 口径，仅用于做 A/B 对照复盘，不要用来下结论。
+    #
+    # 注：中性化需要面板带 industry / mktcap 两列；缺任一列会自动退回 raw 并告警。
+    score_neutralize: bool = True
     # weight_source="ic" 时读取的 summary.csv（相对项目根或绝对路径）。
     # 留空则自动取 runtime/factor_research/ 下最新的一次结果。
     ic_summary_path: str = ""

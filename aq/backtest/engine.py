@@ -252,9 +252,37 @@ class BacktestEngine:
             return
 
         fac_cols = [c for c in self.library.names if c in panel.columns]
-        panel = panel[["date", "symbol"] + fac_cols]
+
+        # ---- 打分口径中性化（2026-09-17 修）----
+        # 修的是一个**口径错位**：IC 在「行业+市值中性化」口径上估
+        # （factor_research.py --neutralize），而回测打分路径原先只做全市场
+        # 横截面 z-score、**完全不中性化**。于是组合按 raw 口径排序，
+        # 低 PB 在全市场口径下 ≈ 买建筑 + 钢铁（深度价值行业押注），
+        # 而不是行业内的横截面选股。IC 与组合口径不一致 → 回测数字不可信。
+        score_neu = bool(getattr(self.cfg.model, "score_neutralize", False))
+        aux = [c for c in ("industry", "mktcap") if c in panel.columns]
+        if score_neu and len(aux) != 2:
+            print(f"[打分口径] 警告：面板缺 {sorted({'industry', 'mktcap'} - set(aux))}，"
+                  f"中性化不生效，退回 raw 口径")
+            score_neu = False
+        if score_neu:
+            from aq.factors.neutralize import neutralize as _neutralize
+
+        panel = panel[["date", "symbol"] + fac_cols + (aux if score_neu else [])]
+        n_neu = 0
         for d, g in panel.groupby("date", sort=False):
-            sub = g.set_index("symbol")[fac_cols]
+            if score_neu:
+                # 逐日中立化：与整表中立化**数学等价**（neutralize 内部本就按
+                # date 分组），但内存占用恒定——不必为 730 万行整表再复制一份。
+                gg = g.copy()
+                _neutralize(gg, fac_cols, date_col="date", industry_col="industry",
+                            mktcap_col="mktcap", suffix="_neu",
+                            inplace=True, verbose=False)
+                sub = gg.set_index("symbol")[[c + "_neu" for c in fac_cols]]
+                sub.columns = fac_cols
+                n_neu += 1
+            else:
+                sub = g.set_index("symbol")[fac_cols]
             if d in self._panel:
                 # 并入已有截面：同 symbol 以本次为准
                 dup = [s for s in sub.index if s in self._panel[d].index]
@@ -262,11 +290,21 @@ class BacktestEngine:
                 self._panel[d] = pd.concat([base, sub])
             else:
                 self._panel[d] = sub
+        tag = f"行业+市值中性化({n_neu}日)" if score_neu else "raw 口径"
         print(f"[因子面板{label}] {len(panel):,} 行 / {len(self._panel)} 个交易日 / "
-              f"{len(fac_cols)} 个因子 / {len(syms)} 只")
+              f"{len(fac_cols)} 个因子 / {len(syms)} 只 / {tag}")
 
     def _factors_at(self, ds: str) -> dict[str, dict[str, float | None]]:
-        """取 ds 日（含）为止的因子横截面。"""
+        """取 ds 日（含）为止的因子横截面。
+
+        面板路径（正常）：值已经是 ``model.score_neutralize`` 决定的口径
+        （默认 = 行业 + 市值中性化，与 IC 估计一致）。
+
+        ⚠️ 降级路径（面板构建失败时）：逐只股票用标量因子库现算，拿不到
+        ``industry`` / ``mktcap``，**因此不做中性化**。此时打分口径会退回 raw、
+        与 IC 估计口径不一致——回测能跑，但结论不可信。看到那句
+        "退化为逐日标量计算"的警告时，请先修面板再解读结果。
+        """
         if self._panel:
             sub = self._panel.get(ds)
             if sub is not None and not sub.empty:
