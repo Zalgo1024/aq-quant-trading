@@ -113,6 +113,8 @@ def build_scorer(cfg=None, library: "FactorLibrary | None" = None) -> "FactorSco
             # 中性化抗性门控。必须在这里透传：ab_weight_test.py 的
             # --icir-ratio 以前只解析不使用，配置改了也影响不到定权结果。
             min_icir_ratio=getattr(m, "ic_min_icir_ratio", 0.5),
+            # 因子子集（研究用 ablation）。空列表 -> None -> 走原逻辑。
+            factor_include=getattr(m, "factor_include", None) or None,
         )
         print(f"[打分] 已加载 IC 权重 <- {Path(p).parent.name}"
               f"（{len(scorer.active_factors())} 个因子有权重，来源 {scorer.ic_source}）")
@@ -200,6 +202,7 @@ class FactorScorer:
         corr: "object | None" = None,
         corr_threshold: float = 0.85,
         min_icir_ratio: float = 0.5,
+        factor_include: "list[str] | None" = None,
     ) -> dict[str, float]:
         """用实测 IC 结果自动定权。
 
@@ -222,6 +225,10 @@ class FactorScorer:
         select / corr / corr_threshold
             是否做因子筛选（显著性 + 风格依赖 + 相关性去冗余）。
             强烈建议开启；关掉会让高相关因子重复计权。
+        factor_include
+            因子子集。非空时**只有**列出的因子参与定权，且改用一套为该场景
+            定制的口径：跳过组内 min-max、跳过单因子 cap，直接按 |v| 比例分配。
+            子集内权重全零时**抛错**（不退化为全因子等权）。
         """
         import pandas as pd
 
@@ -306,14 +313,54 @@ class FactorScorer:
         for n in self.weights:
             raw.setdefault(n, 0.0)
 
-        # ---- 组内 min-max 归一化 + 幂次压缩 ----
-        vals = [v for v in raw.values() if v > 0]
-        if vals:
-            lo, hi = min(vals), max(vals)
-            span = (hi - lo) or hi or 1.0
-            scaled = {k: (((v - lo) / span) if v > 0 else 0.0) ** shrink for k, v in raw.items()}
+        # ---- 权重基准：子集模式 vs 全因子模式 ----
+        #
+        # 子集模式（factor_include 非空）不是"少选几个因子"那么简单，它必须
+        # 换一套归一化口径，否则会产出**伪结论**：
+        #
+        #   组内 min-max（下面 else 分支）会把最小值恒压成 0。代入实测数
+        #   (bp 0.198 / ep 0.171 / sp 0.158) -> 1.0 / 0.5 / 0.0。sp 被压成 0 后，
+        #   单因子 cap 的迭代重分配是按**权重比例**补的（见下方 cap 循环），
+        #   对 0 权重因子分配恒为 0 —— sp 永远回不来。最后权重 bp 0.5 / ep 0.5 /
+        #   sp 0.0，看起来像"市销率无效"，其实纯粹是 N=3 下的归一化伪影。
+        #
+        # 故子集模式改为**直接按 |RankICIR| 比例分配**，并令 cap=1.0 使
+        # 后面的 cap 循环自然空转（cap=0.25 在 3 因子里同样会强制等权、
+        # 丢掉 ICIR 区分度）。这套差异属于"为该实验定制的口径"，
+        # 已记入 `_ic_source`，复用结果时必须知情。
+        subset_mode = bool(factor_include)
+        if subset_mode:
+            keep = {normalize_name(f) for f in factor_include}
+            if not keep:
+                raise ValueError("factor_include 为空集合，会导致全零权重")
+            unknown = keep - set(self.weights)
+            if unknown:
+                raise ValueError(
+                    f"factor_include 含因子库中不存在的因子：{sorted(unknown)}；"
+                    f"库内可用名字 {len(self.weights)} 个")
+            raw = {k: (raw.get(k, 0.0) if k in keep else 0.0) for k in raw}
+            if sum(v for v in raw.values() if v > 0) <= 0:
+                # 绝不允许静默降级：权重全零时 `_normalize_weights` 会把
+                # 全部 31 个因子等权，跑出来的其实是全因子组合，
+                # 却贴着"估值独立测试"的标签 —— 假结论比报错危险得多。
+                raise RuntimeError(
+                    "factor_include 子集内因子全部未过显著性/中性化门控，权重全零。\n"
+                    "  拒绝静默退化为全因子等权：那会得到一份贴错标签的回测。\n"
+                    f"  子集={sorted(keep)}；"
+                    f"门槛 ic_min_abs={min_abs_ic} / ic_max_p={max_p}。\n"
+                    "  请检查 summary.csv 的 rank_ic / rank_ic_p。")
+            scaled = dict(raw)
+            cap = 1.0
         else:
-            scaled = dict.fromkeys(raw, 0.0)
+            # ---- 组内 min-max 归一化 + 幂次压缩（原逻辑，逐字保留）----
+            vals = [v for v in raw.values() if v > 0]
+            if vals:
+                lo, hi = min(vals), max(vals)
+                span = (hi - lo) or hi or 1.0
+                scaled = {k: (((v - lo) / span) if v > 0 else 0.0) ** shrink
+                          for k, v in raw.items()}
+            else:
+                scaled = dict.fromkeys(raw, 0.0)
 
         # ---------------------------------------------------------------
         # **权重一律取正号**：因子的"好坏方向"由 `library.direction()` 在
@@ -376,8 +423,17 @@ class FactorScorer:
 
         self.weights = new_w
         self.use_ic_weight = True
-        self._ic_source = f"ic:{mode}" + ("+select" if selected is not None else "")
+        self._ic_source = (f"ic:{mode}"
+                           + ("+select" if selected is not None else "")
+                           + ("+subset" if subset_mode else ""))
         self._normalize_weights()
+        if subset_mode:
+            # 子集模式必须打出来：这是"标签和内容是否一致"的唯一现场证据。
+            # 曾经的反面教材是 A/B 实验里"IC 加权组"其实跑的是先验权重。
+            live = sorted(((k, v) for k, v in self.weights.items() if abs(v) > 1e-9),
+                          key=lambda kv: -abs(kv[1]))
+            print("[打分][子集] factor_include = "
+                  + ", ".join(f"{k}={v:.3f}" for k, v in live))
         return dict(self.weights)
 
     @property

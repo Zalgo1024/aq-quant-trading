@@ -57,6 +57,20 @@ from aq.core.rules import TRADING_DAYS_PER_YEAR  # noqa: E402
 FACTOR_DIR = PROJECT_ROOT / "runtime" / "factor_research"
 CSC_DIR = PROJECT_ROOT / "runtime" / "cscv"
 
+# --------------------------------------------------------------------------
+# 因子子集（研究用 ablation）
+# --------------------------------------------------------------------------
+# 为什么要这一维：IC 加权按 |RankICIR| 定权、不管换手，低换手的估值因子
+# （bp/ep/sp 单边换手仅 1.5%~2.1%，gap 是 79%）在全因子组合里只拿到约 5.7%
+# 权重。想回答"估值因子到底有没有 alpha"，必须能把其余 28 个按下去单独跑。
+#
+# all 必须留空列表（而不是 31 个因子名的显式列表）：空 -> 打分器走原逻辑
+# （min-max + cap），结果与历史版本逐字可比。
+FACTOR_SETS: dict[str, list[str]] = {
+    "all": [],                          # 不限制，与已有结果可比
+    "valuation": ["bp", "ep", "sp"],    # 估值三兄弟（主测）
+}
+
 
 # --------------------------------------------------------------------------
 # 参数
@@ -75,6 +89,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--universe", default="liquid", choices=["hs300", "liquid", "all"])
     p.add_argument("--variant", default="full_neu")
     p.add_argument("--tag", default="main", help="结果目录后缀，区分不同实验")
+    p.add_argument("--factor-set", default="all", choices=list(FACTOR_SETS),
+                   help="因子子集：all=全因子（原口径）；valuation=bp/ep/sp 独立上场")
     p.add_argument("--ic-raw", default="",
                    help="未中性化变体目录（如 runtime/factor_research/full_raw）。"
                         "walk-forward 的'中性化抗性门控'需要它做分母，"
@@ -163,16 +179,27 @@ def build_configs(args) -> list[dict]:
     weights = [w.strip() for w in str(args.weights).split(",") if w.strip()]
     base_w = weights[0]
 
+    # 因子子集必须进缓存 key 与 label：否则 `--factor-set valuation` 会
+    # **命中全因子那一轮的同名缓存**，直接输出"全因子组合"的日收益序列，
+    # 却被当成"估值独立测试"的结论 —— 一份贴错标签的结果比报错危险得多。
+    #
+    # 但 all（默认）时 label 必须**逐字不变**，否则 liquid_v2 / liquid_wf /
+    # hs300_main 等已有结果全部失效，白白重跑几十分钟。故用前缀法：
+    # 只有非 all 才加 `f{set}_`。同理 key 也带上 fset，防止同一 label 撞车。
+    fset = str(getattr(args, "factor_set", "all") or "all")
+    prefix = "" if fset == "all" else f"f{fset}_"
+
     cfgs: list[dict] = []
     seen: set[tuple] = set()
 
     def add(w, h, t):
-        key = (w, h, float(t))
+        key = (w, h, float(t), fset)
         if key in seen:
             return
         seen.add(key)
         cfgs.append({"weight_source": w, "hold": h, "turnover": float(t),
-                     "label": f"w{w}_h{h}d_t{t:g}"})
+                     "factor_set": fset,
+                     "label": f"{prefix}w{w}_h{h}d_t{t:g}"})
 
     if args.grid in ("both", "turnover"):
         for t in turnovers:
@@ -222,6 +249,10 @@ def run_one(cfg, spec: dict, cache_dir: Path, args) -> tuple[pd.Series, dict, pd
     bpath = cache_dir / f"{label}.bench.csv"
 
     cfg.model.weight_source = spec["weight_source"]
+    # 因子子集必须在**构造引擎之前**写进去：打分器是在 BacktestEngine.__init__
+    # 里 build 的，run() 之后再改 cfg 对已建好的 scorer 无效。
+    fset = str(spec.get("factor_set", "all") or "all")
+    cfg.model.factor_include = list(FACTOR_SETS.get(fset, []))
     cfg.risk.liquidity_min_turnover = spec["turnover"]
     # ⚠️ rebalance_days 必须在**构造引擎之前**写进 cfg：
     # 它是在 BacktestEngine.__init__ 里被 _parse_rebalance_days 解析的，
@@ -257,6 +288,8 @@ def run_one(cfg, spec: dict, cache_dir: Path, args) -> tuple[pd.Series, dict, pd
     meta = {
         "label": label,
         "weight_source": spec["weight_source"],
+        "factor_set": spec.get("factor_set", "all"),
+        "factor_include": list(FACTOR_SETS.get(spec.get("factor_set", "all"), [])),
         "hold_days": spec["hold"],
         "risk_turnover": spec["turnover"],
         "total_return": getattr(m, "total_return", None),
@@ -418,6 +451,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg.model.ic_summary_path = str(vdir / "summary.csv")
     cfg.model.ic_weight_mode = "icir"
     cfg.model.ic_select = True
+    cfg.model.factor_include = list(FACTOR_SETS[args.factor_set])
     if args.ic_raw:
         cfg.model.ic_raw_summary_path = str(Path(args.ic_raw) / "summary.csv")
     cfg.model.wf_window = int(args.wf_window)
@@ -426,6 +460,11 @@ def main(argv: list[str] | None = None) -> int:
 
     uni_note = _apply_universe(cfg, args.universe)
     print(f"[池子] {args.universe} —— {uni_note}")
+    if cfg.model.factor_include:
+        print(f"[因子集] {args.factor_set} = {', '.join(cfg.model.factor_include)}"
+              f"（子集口径：按 |RankICIR| 比例分配，跳过 min-max 与单因子 cap）")
+    else:
+        print("[因子集] all —— 全因子 + 组内 min-max + 单因子 cap（原口径）")
     print(f"[缓存] {cache_dir}")
 
     specs = build_configs(args)

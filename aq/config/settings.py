@@ -162,6 +162,21 @@ class ModelConfig(BaseModel):
     # 线上实盘若不想因研究产物缺失而中断，可显式设为 False。
     ic_strict: bool = True
 
+    # 因子子集（研究用 ablation）：非空时**只有**列出的因子能拿到权重。
+    #
+    # 为什么需要它：IC 加权按 |RankICIR| 定权、完全不管换手，于是低换手的
+    # 估值因子（bp/ep/sp）在全因子组合里只分到约 5.7% 权重 —— 想单独检验
+    # "估值因子到底有没有 alpha"，就必须能把其余因子按下去。
+    #
+    # 子集模式与全因子模式的**口径差异**（务必知情，否则会误读结果）：
+    #   1. 跳过组内 min-max 归一化 —— N=3 时最小值恒被压成 0（伪影）；
+    #   2. 跳过单因子 cap —— cap=0.25 在 3 因子里会强制等权、丢失 ICIR 区分度。
+    # 权重改为直接按 |RankICIR| 比例分配。若子集内权重全零，**直接抛错**
+    # 而非退化为全因子等权（后者会产出一份贴错标签的回测）。
+    #
+    # 空列表（默认）= 不限制，行为与历史版本逐字一致。
+    factor_include: list[str] = Field(default_factory=list)
+
     # ---- Walk-forward 定权（weight_source="ic_wf"）----
     # 只用截至时点的历史 IC 重新筛因子、重新定权，使日收益真正样本外。
     # 见 aq/factors/walkforward.py 与报告 7.14。
