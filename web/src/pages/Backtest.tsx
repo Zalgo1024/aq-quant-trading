@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { Card, Form, InputNumber, DatePicker, Button, Row, Col, Statistic, Table, message, Spin, Empty, Space } from 'antd'
+import { Card, Form, InputNumber, DatePicker, Button, Row, Col, Statistic, Table, message, Spin, Empty, Space, Alert, Tag } from 'antd'
 import ReactECharts from 'echarts-for-react'
 import dayjs from 'dayjs'
 import api from '@/services/api'
@@ -29,6 +29,7 @@ export default function Backtest() {
       end: vals.range?.[1]?.format('YYYY-MM-DD'),
       top_k: vals.top_k,
       initial_cash: vals.initial_cash,
+      max_symbols: vals.max_symbols || undefined,
       mode: 'backtest',
     })
   }
@@ -104,6 +105,19 @@ export default function Backtest() {
 
   return (
     <div>
+      <Alert
+        type="warning"
+        showIcon
+        style={{ marginBottom: 12 }}
+        message="回测很慢，且本页结果不构成任何依据"
+        description={
+          <span style={{ fontSize: 12, lineHeight: 1.8 }}>
+            全池 5000+ 只建一次因子面板需数分钟，请求超时上限 180 秒；想快速看引擎行为请把
+            「股票池上限」设成 300~500（截断按代码序，**有系统性偏置，不能用于下结论**）。
+            本项目多因子路线在研究中已被证伪，此处只用于验证回测引擎本身是否按预期执行。
+          </span>
+        }
+      />
       <Card title="回测配置" size="small">
         <Form
           form={form}
@@ -113,6 +127,9 @@ export default function Backtest() {
             range: [dayjs('2023-01-01'), dayjs('2024-06-30')],
             top_k: 5,
             initial_cash: 1_000_000,
+            // 默认截断到 300 只：不截断会跑几分钟并可能超时。
+            // 结果页会显式标出"截断口径"，避免被当成有效结论。
+            max_symbols: 300,
           }}
         >
           <Form.Item name="range" label="回测区间" rules={[{ required: true }]}>
@@ -123,6 +140,9 @@ export default function Backtest() {
           </Form.Item>
           <Form.Item name="initial_cash" label="初始资金">
             <InputNumber min={100_000} step={100_000} style={{ width: 140 }} />
+          </Form.Item>
+          <Form.Item name="max_symbols" label="股票池上限" tooltip="留空=用配置（0，不截断，很慢）；填 300~500 可快速自检，但截断按代码序有系统性偏置">
+            <InputNumber min={0} max={6000} step={100} style={{ width: 110 }} placeholder="0=不截断" />
           </Form.Item>
           <Form.Item>
             <Button type="primary" htmlType="submit" loading={mut.isPending}>
@@ -186,6 +206,50 @@ export default function Backtest() {
                 />
               </Col>
             </Row>
+          </Card>
+
+          {/* 过程诊断：只看 metrics 无法判断回测有没有真的按预期执行
+              （曾出现 890 笔订单全被拒、仓位恒为 0，但收益曲线"看起来正常"）。 */}
+          <Card
+            title="过程诊断（判断回测是否真的执行了）"
+            size="small"
+            style={{ marginTop: 16 }}
+          >
+            <Space direction="vertical" size={4} style={{ width: '100%' }}>
+              <div style={{ fontSize: 12, color: '#999' }}>
+                用时 <span className="mono">{result.elapsed_seconds ?? '-'}</span> 秒 ｜
+                股票池上限{' '}
+                <span className="mono">
+                  {(result.max_symbols ?? 0) === 0 ? '不截断' : result.max_symbols}
+                </span>
+                {(result.max_symbols ?? 0) > 0 && (
+                  <Tag color="orange" style={{ marginLeft: 8 }}>
+                    截断口径（按代码序，有偏置，不可作结论）
+                  </Tag>
+                )}
+              </div>
+              {result.diagnostics && Object.keys(result.diagnostics).length > 0 ? (
+                <pre
+                  className="mono"
+                  style={{
+                    background: '#1a1a1a',
+                    padding: 10,
+                    borderRadius: 6,
+                    fontSize: 12,
+                    color: '#bbb',
+                    margin: 0,
+                    maxHeight: 220,
+                    overflow: 'auto',
+                  }}
+                >
+                  {JSON.stringify(result.diagnostics, null, 2)}
+                </pre>
+              ) : (
+                <span style={{ fontSize: 12, color: '#8c8c8c' }}>
+                  引擎未返回 diagnostics —— 不能判断订单是否真的成交，请谨慎解读。
+                </span>
+              )}
+            </Space>
           </Card>
 
           <Card title="权益曲线 · 回撤" size="small" style={{ marginTop: 16 }}>

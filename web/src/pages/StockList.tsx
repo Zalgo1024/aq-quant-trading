@@ -1,138 +1,208 @@
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Card, Input, Table, Tag, Progress, Space, Tooltip, Button } from 'antd'
+import { Card, Input, Table, Tag, Space, Segmented, Switch, Tooltip, Typography } from 'antd'
+import { SearchOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
-import { Link, useNavigate } from 'react-router-dom'
-import { useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import api from '@/services/api'
-import type { Signal } from '@/types'
-import { DIRECTION_LABEL, fmtPct } from '@/utils/format'
+import type { Quote } from '@/types'
+import { BOARD_LABEL, fmtAmount, fmtPct, pctColor } from '@/utils/format'
 
+/**
+ * 全市场行情表。
+ *
+ * 旧实现有两个问题：① 股票列表来自 /api/signals（只覆盖打分样本 30 只），
+ * 所以"全市场行情"其实只有 30 行；② 名称/行业要另外拉 5562 条元数据来拼表。
+ * 现在一律走后端 /api/quotes：服务端分页 + 搜索 + 板块 + 流动性池过滤，
+ * 返回的每条记录自带名称/行业/真实价/涨跌/成交额/异动 z 值。
+ */
 export default function StockList() {
-  const nav = useNavigate()
   const [kw, setKw] = useState('')
+  const [board, setBoard] = useState('')
+  const [onlyLiquid, setOnlyLiquid] = useState(false)
+  const [sort, setSort] = useState('amount')
+  const [page, setPage] = useState(1)
+  const pageSize = 50
 
-  const { data: stocks } = useQuery({ queryKey: ['stocks'], queryFn: api.stocks })
-  // 用 signals 接口拿到模型评分（含方向与置信度）
-  const { data: preds, isLoading } = useQuery({
-    queryKey: ['signals-all'],
-    queryFn: () => api.signals(30),
+  const { data, isLoading, isFetching } = useQuery({
+    queryKey: ['quotes-full', kw, board, onlyLiquid, sort, page],
+    queryFn: () =>
+      api.quotes({
+        keyword: kw,
+        board,
+        only_liquid: onlyLiquid,
+        sort,
+        order: 'desc',
+        limit: pageSize,
+        offset: (page - 1) * pageSize,
+      }),
   })
 
-  const nameOf = useMemo(() => {
-    const m: Record<string, string> = {}
-    ;(stocks ?? []).forEach((s) => (m[s.symbol] = s.name))
-    return m
-  }, [stocks])
-
-  const industryOf = useMemo(() => {
-    const m: Record<string, string> = {}
-    ;(stocks ?? []).forEach((s) => (m[s.symbol] = s.industry ?? '-'))
-    return m
-  }, [stocks])
-
-  const rows: Signal[] = preds ?? []
-
-  const columns: ColumnsType<any> = [
+  const columns: ColumnsType<Quote> = [
     {
       title: '代码',
       dataIndex: 'symbol',
-      width: 90,
-      render: (v: string) => <Link to={`/stock/${v}`}>{v}</Link>,
+      width: 84,
+      fixed: 'left',
+      render: (v: string) => <Link to={`/stock/${v}`} className="mono">{v}</Link>,
     },
+    { title: '名称', dataIndex: 'name', width: 110, fixed: 'left', ellipsis: true },
     {
-      title: '名称',
-      width: 110,
-      render: (_: unknown, r: any) => nameOf[r.symbol] ?? r.symbol,
+      title: '板块',
+      dataIndex: 'board',
+      width: 76,
+      render: (v: string) => <Tag style={{ fontSize: 11 }}>{BOARD_LABEL[v] ?? v}</Tag>,
     },
     {
       title: '行业',
-      width: 100,
-      render: (_: unknown, r: any) => industryOf[r.symbol] ?? '-',
+      dataIndex: 'industry',
+      width: 170,
+      ellipsis: true,
+      render: (v: string) => <span style={{ fontSize: 12, color: '#999' }}>{v || '-'}</span>,
     },
     {
-      title: 'AI 评分',
-      dataIndex: 'strength',
-      width: 160,
-      sorter: (a: any, b: any) => (a.strength ?? 0) - (b.strength ?? 0),
-      defaultSortOrder: 'descend',
+      title: '现价',
+      dataIndex: 'close',
+      width: 96,
+      align: 'right',
+      sorter: (a, b) => a.close - b.close,
+      render: (v: number) => <span className="mono">{v.toFixed(2)}</span>,
+    },
+    {
+      title: '涨跌幅',
+      dataIndex: 'pct_chg',
+      width: 100,
+      align: 'right',
+      sorter: (a, b) => a.pct_chg - b.pct_chg,
       render: (v: number) => (
-        <Tooltip title={v?.toFixed(4)}>
-          <Progress
-            percent={Math.round((v ?? 0) * 100)}
-            size="small"
-            strokeColor={v >= 0.55 ? '#f5222d' : v <= 0.45 ? '#52c41a' : '#8c8c8c'}
-            format={(p) => `${p}`}
-          />
+        <span className="mono" style={{ color: pctColor(v) }}>{fmtPct(v)}</span>
+      ),
+    },
+    {
+      title: '成交额',
+      dataIndex: 'amount',
+      width: 104,
+      align: 'right',
+      sorter: (a, b) => a.amount - b.amount,
+      render: (v: number) => <span className="mono">{fmtAmount(v)}</span>,
+    },
+    {
+      title: '20日均额',
+      dataIndex: 'amount_ma20',
+      width: 104,
+      align: 'right',
+      render: (v: number) => <span className="mono">{fmtAmount(v)}</span>,
+    },
+    {
+      title: '异动 z',
+      dataIndex: 'z_score',
+      width: 84,
+      align: 'right',
+      sorter: (a, b) => Math.abs(a.z_score) - Math.abs(b.z_score),
+      render: (v: number) => (
+        <Tooltip title="当日收益相对自身前 60 日分布的偏离（σ）">
+          <span className="mono" style={{ color: Math.abs(v) >= 3 ? '#f5222d' : '#8c8c8c' }}>
+            {v.toFixed(2)}
+          </span>
         </Tooltip>
       ),
     },
     {
-      title: '置信度',
-      dataIndex: 'confidence',
-      width: 100,
-      align: 'right',
-      render: (v: number) => <span className="mono">{fmtPct(v)}</span>,
-    },
-    {
-      title: '方向',
-      dataIndex: 'side',
-      width: 90,
-      filters: [
-        { text: '买入', value: 'BUY' },
-        { text: '卖出', value: 'SELL' },
-      ],
-      onFilter: (v: any, r: any) => r.side === v,
-      render: (v: string) => (
-        <Tag color={v === 'BUY' ? 'red' : v === 'SELL' ? 'green' : 'default'}>
-          {DIRECTION_LABEL[v] ?? v}
-        </Tag>
-      ),
-    },
-    {
-      title: '主因子',
-      dataIndex: 'trigger_factor',
-      width: 140,
-      render: (v: string) => <span style={{ fontSize: 12, color: '#8c8c8c' }}>{v}</span>,
-    },
-    {
-      title: '操作',
-      width: 90,
-      render: (_: unknown, r: any) => (
-        <Button type="link" size="small" onClick={() => nav(`/stock/${r.symbol}`)}>
-          详情
-        </Button>
-      ),
+      title: '池',
+      dataIndex: 'in_liquid',
+      width: 70,
+      align: 'center',
+      render: (v: boolean) =>
+        v ? (
+          <Tooltip title="属于主口径流动性池（上市满 180 天 + 近 20 日日均成交额 ≥ 2000 万 + 非 ST 快照）">
+            <Tag color="blue">在池</Tag>
+          </Tooltip>
+        ) : (
+          <Tag>—</Tag>
+        ),
     },
   ]
 
-  const filtered = rows.filter((r: any) => {
-    if (!kw) return true
-    const n = nameOf[r.symbol] ?? ''
-    return r.symbol.includes(kw) || n.includes(kw)
-  })
-
   return (
     <Card
-      title="自选 / AI 选股"
       size="small"
+      title="全市场行情"
       extra={
-        <Space>
-          <Input.Search
-            placeholder="搜索代码或名称"
+        <Space wrap>
+          <Segmented
+            size="small"
+            value={board}
+            onChange={(v) => {
+              setBoard(String(v))
+              setPage(1)
+            }}
+            options={[
+              { label: '全部', value: '' },
+              { label: '主板', value: 'MAIN' },
+              { label: '创业板', value: 'CHINEXT' },
+              { label: '科创板', value: 'STAR' },
+              { label: '北交所', value: 'BSE' },
+            ]}
+          />
+          <Segmented
+            size="small"
+            value={sort}
+            onChange={(v) => {
+              setSort(String(v))
+              setPage(1)
+            }}
+            options={[
+              { label: '成交额', value: 'amount' },
+              { label: '涨跌幅', value: 'pct_chg' },
+              { label: '代码', value: 'symbol' },
+            ]}
+          />
+          <Space size={6}>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              仅流动性池
+            </Typography.Text>
+            <Switch
+              size="small"
+              checked={onlyLiquid}
+              onChange={(v) => {
+                setOnlyLiquid(v)
+                setPage(1)
+              }}
+            />
+          </Space>
+          <Input
+            size="small"
             allowClear
-            style={{ width: 220 }}
-            onChange={(e) => setKw(e.target.value.trim())}
+            prefix={<SearchOutlined />}
+            placeholder="代码 / 名称"
+            style={{ width: 150 }}
+            onChange={(e) => {
+              setKw(e.target.value.trim())
+              setPage(1)
+            }}
           />
         </Space>
       }
     >
+      <div style={{ marginBottom: 8, fontSize: 12, color: '#8c8c8c' }}>
+        数据截至 <span className="mono">{data?.asof ?? '—'}</span> ｜ 命中{' '}
+        <span className="mono">{data?.total ?? 0}</span> 只（服务端分页，每页 {pageSize}）
+      </div>
       <Table
         rowKey="symbol"
         size="small"
-        loading={isLoading}
+        loading={isLoading || isFetching}
         columns={columns}
-        dataSource={filtered}
-        pagination={{ pageSize: 15, size: 'small', showSizeChanger: false }}
+        dataSource={data?.items ?? []}
+        scroll={{ x: 1180 }}
+        pagination={{
+          current: page,
+          pageSize,
+          total: data?.total ?? 0,
+          showSizeChanger: false,
+          onChange: setPage,
+          showTotal: (t) => `共 ${t} 只`,
+        }}
       />
     </Card>
   )

@@ -7,6 +7,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 import AppLayout from '@/components/AppLayout'
 import MarketOverviewPage from '@/pages/MarketOverview'
+import ProjectStatusPage from '@/pages/ProjectStatus'
 import StockListPage from '@/pages/StockList'
 import StockDetailPage from '@/pages/StockDetail'
 import SignalsPage from '@/pages/Signals'
@@ -41,6 +42,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
             <Route path="/" element={<AppLayout />}>
               <Route index element={<Navigate to="/market" replace />} />
               <Route path="market" element={<MarketOverviewPage />} />
+              <Route path="status" element={<ProjectStatusPage />} />
               <Route path="stocks" element={<StockListPage />} />
               <Route path="stock/:code" element={<StockDetailPage />} />
               <Route path="signals" element={<SignalsPage />} />

@@ -46,3 +46,40 @@ export const SEVERITY_LABEL: Record<string, string> = {
   warn: '警告',
   severe: '严重',
 }
+
+export const BOARD_LABEL: Record<string, string> = {
+  MAIN: '主板',
+  CHINEXT: '创业板',
+  STAR: '科创板',
+  BSE: '北交所',
+}
+
+export const STAGE_STATUS_LABEL: Record<string, string> = {
+  done: '已完成',
+  in_progress: '进行中',
+  blocked: '受阻',
+  todo: '未开始',
+}
+
+export const STAGE_STATUS_COLOR: Record<string, string> = {
+  done: '#52c41a',
+  in_progress: '#1668dc',
+  blocked: '#f5222d',
+  todo: '#8c8c8c',
+}
+
+/** 数据严重程度 -> 颜色（数据缺口用） */
+export const GAP_COLOR: Record<string, string> = {
+  high: '#f5222d',
+  medium: '#faad14',
+  low: '#8c8c8c',
+}
+
+/** 1234567 -> 123.46万 */
+export function fmtCount(v: number | null | undefined): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return '-'
+  if (Math.abs(v) >= 1e8) return `${(v / 1e8).toFixed(2)}亿`
+  if (Math.abs(v) >= 1e4) return `${(v / 1e4).toFixed(2)}万`
+  return String(v)
+}
+

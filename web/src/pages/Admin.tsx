@@ -166,7 +166,7 @@ export default function Admin() {
 
         <Col xs={24} md={12}>
           <Card title="模拟账户" size="small">
-            {account ? (
+            {account && account.is_funded ? (
               <Row gutter={16}>
                 <Col span={12}>
                   <Statistic title="总资产" value={account.total_asset} precision={2} prefix="¥" />
@@ -188,7 +188,17 @@ export default function Admin() {
                 </Col>
               </Row>
             ) : (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />
+              // 空白态必须说清楚"为什么是空的"：以前直接渲染四个 ¥0.00，
+              // 看起来像"钱没了"或"系统坏了"，实际只是还没到投钱那一步。
+              <Empty
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                description={
+                  <span style={{ fontSize: 12, color: '#8c8c8c', lineHeight: 1.8 }}>
+                    模拟账户尚未投入资金（当前阶段 0 尚未开始小额实盘，
+                    因此现金/持仓均为空）。账户写入 runtime/sim_account.json。
+                  </span>
+                }
+              />
             )}
           </Card>
         </Col>
