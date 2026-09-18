@@ -39,6 +39,7 @@ python scripts/cscv_test.py --universe liquid --variant full_neu_v2 \
 | `probe_etf_replication.py` | 把回归系数翻译成静态 ETF 组合，**跑不跑得赢策略本身**？ | 同上 | 终局诊断 §1.3 |
 | `probe_survivorship.py` | 幸存者偏差有多大？（跌得多的后续表现 / 便宜=捡刀子 / 删失规模 / 组合拖累） | `data_cache/bars`+`valuation`+`stock_list`，联网取退市名单 | 终局诊断 §1.4 |
 | `probe_factor_dimensionality.py` | 31 个因子实际有几个**独立方向**？（PR、主成分、MP 噪声上界） | `runtime/factor_research/` | 终局诊断 §4「多智能体不做」 |
+| `probe_risk_budget.py` | 给定「组合最大回撤 ≤ X%」，**权益仓位上限**是多少？（附历史水下区间清单） | `data_cache/index_bars/` | 小额实盘方案 §1 |
 | `probe_data_reach.py` | 1990/2005 的数据到底拉不拉得到？（5 项预检） | 联网 | 终局诊断 §3 |
 | `probe_delist_bars.py` | 退市股的**历史日线**有没有可用源？ | 联网 | 终局诊断 §3 |
 | `probe_excess_rf.py` | 超额口径有没有把无风险利率扣两次？ | 联网 + `runtime/cscv/*.json` | README §4.2 |
