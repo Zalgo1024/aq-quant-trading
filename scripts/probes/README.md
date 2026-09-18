@@ -42,6 +42,7 @@ python scripts/fetch_etf.py --group core --nav --actions
 | `probe_style_exposure.py` | 所谓 alpha 是不是只是**市场 + 规模**暴露？（Newey-West 双因子回归） | 上面 + `data_cache/index_bars/` | 终局诊断 §1.2 |
 | `probe_etf_replication.py` | 把回归系数翻译成静态 ETF 组合，**跑不跑得赢策略本身**？ | 同上 | 终局诊断 §1.3 |
 | `probe_survivorship.py` | 幸存者偏差有多大？（跌得多的后续表现 / 便宜=捡刀子 / 删失规模 / 组合拖累） | `data_cache/bars`+`valuation`+`stock_list`，联网取退市名单 | 终局诊断 §1.4 |
+| `probe_survivorship_corrected.py` | ⭐ **上者的正确口径版**：修正 `close × adj_factor` 重复复权 + 并入退市股（退市可实现损失） | `data_cache/bars`+`delisted_bars` | 退市股数据层 §7 |
 | `probe_factor_dimensionality.py` | 31 个因子实际有几个**独立方向**？（PR、主成分、MP 噪声上界） | `runtime/factor_research/` | 终局诊断 §4「多智能体不做」 |
 | `probe_risk_budget.py` | 给定「组合最大回撤 ≤ X%」，**权益仓位上限**是多少？（附历史水下区间清单） | `data_cache/index_bars/` | 小额实盘方案 §1 |
 | `probe_data_reach.py` | 1990/2005 的数据到底拉不拉得到？（5 项预检） | 联网 | 终局诊断 §3 |
@@ -61,8 +62,11 @@ python scripts/fetch_etf.py --group core --nav --actions
 | `probe_etf_nondiv_outliers.py` | 把"偏离极值"**还原成原始行**：那一天到底发生了什么？ | `data_cache/etf_nav` | ETF 数据层 §5.3 |
 | `probe_etf_survivorship.py` | ETF 侧的幸存者偏差（清盘/合并的标的不在今天的列表里） | 联网 | ETF 数据层 §8 |
 | `dump_etf_event.py` | 单个事件的逐行 dump（调试用） | `data_cache/etf_*` | — |
+| `probe_limit_field_bias.py` | ⭐ `bars/` 的涨跌停价可信吗？（**物理约束定罪** + 错配分类 + baostock `isST` 基准裁决） | `data_cache/bars`+`st_flags` | 退市股数据层 §9 |
+| `probe_limit_fill_impact.py` | 涨跌停错配**改变了多少"封板成交判定"**？（错误放行日实测） | 同上 + `data_cache/delisted_bars` | 退市股数据层 §9 |
+| `probe_st_from_limit.py` | 能不能用涨跌停价反推逐日 ST？ | 同上 | 退市股数据层 §9（**结论：不能，循环论证**） |
 
-## 三个通用陷阱（都在这堆脚本里踩过，所以写下来）
+## 四个通用陷阱（都在这堆脚本里踩过，所以写下来）
 
 - **任何"从大池子里挑少数"的指标，必须先建随机基准。**
   本项目栽过两次：一次是行业集中度的 TVD（随机抽 20 只的基准就有 0.545），
@@ -77,3 +81,11 @@ python scripts/fetch_etf.py --group core --nav --actions
   2 位小数百分比的**分辨率以下**，第二次经过时以 1.02 倍的舍入噪声再除一次 100）。
   验收必须含**负对照**：把数据故意乘 100，判据必须爆表、守卫必须能改回 ——
   否则"通过"不携带任何信息。见 [ETF 数据层 §4/§6](../docs/ETF数据层与全收益口径.md)。
+- **结果"过于干净"（全 0 / 全体一致）先查 NaN 传播 —— 它会伪装成好消息。**
+  `probe_limit_field_bias.py` 第一版把**比值**（≈1.05）直接和**百分点**（0.05）比，
+  误差恒为 ~1.0 ⇒ 阈值永不成立 ⇒ 掩码恒 `False` ⇒ 打印「越界 0 / 1300707 = 0.000%」，
+  **不报错、还像"字段没问题"**。
+  ⇒ 三条加固：报结果必带**分母与 NaN 率**；中间量 NaN 率超阈值就**拒绝出结论**；
+  **先手工确认至少一个已知反例**（本例 000078 记录幅度 5% 却走出 −5.96%），
+  探针若报「0 例」⇒ 判定探针坏了，而非数据干净。
+  > 报「0 个问题」之前，先问这个 0 是怎么来的。
