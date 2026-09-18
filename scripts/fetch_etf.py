@@ -271,6 +271,58 @@ def _codes_of(df: pd.DataFrame, col_hints: tuple[str, ...]) -> set[str]:
                .str.replace(r"\.(SH|SZ)$", "", regex=True).str.zfill(6))
 
 
+def _name_map(df: pd.DataFrame) -> dict[str, str]:
+    """按**行位置**配对「代码 → 名称」。
+
+    ⚠️ 2026-09-18 修 P0 缺陷：旧代码写成
+    ``dict(zip(_codes_of(df, ("代码",)), df["名称"]))`` ——
+    ``_codes_of`` 返回的是 **set**（无序、去重），拿它去 zip 一列**有序**的名称，
+    等于把名称按哈希顺序乱配到代码上。实测后果：
+
+    - 510300 被配成「云计算50ETF新华」（真实＝华泰柏瑞沪深300ETF）
+    - 510880 被配成「港股汽车ETF国泰」（真实＝华泰柏瑞红利ETF）
+    - 512890 被配成「银行ETF华泰柏瑞」（真实＝华泰柏瑞红利低波ETF）
+
+    凡按名称给 ETF 分类的东西（红利/低波/宽基分组、债/货/商品/跨境剔除）
+    全部静默错位，且**不会报错** —— 只会给出一个看起来很正常的错答案。
+    """
+    if df is None or df.empty:
+        return {}
+    col = next((c for c in ("代码",) if c in df.columns), None)
+    if col is None or "名称" not in df.columns:
+        return {}
+    codes = (df[col].astype(str)
+             .str.replace(r"^(sh|sz)", "", regex=True)
+             .str.replace(r"\.(SH|SZ)$", "", regex=True)
+             .str.zfill(6))
+    out: dict[str, str] = {}
+    for c, n in zip(codes, df["名称"].astype(str)):
+        out.setdefault(c, n)
+    return out
+
+
+# 事实锚：这几个代码叫什么名字是**公开事实**，不依赖任何数据源。
+# 用它当硬校验 —— 名称错位是静默错误，只能靠外部事实抓。
+NAME_ANCHORS: dict[str, tuple[str, ...]] = {
+    "510300": ("沪深300", "沪深 300"),   # 华泰柏瑞沪深300ETF，2012-05 上市
+    "510050": ("上证50", "50ETF"),       # 华夏上证50ETF，2004-12 上市
+    "510880": ("红利",),                 # 华泰柏瑞红利ETF，2006-11 上市
+    "518880": ("黄金",),                 # 华安黄金ETF，2013-07 上市
+    "588000": ("科创50", "科创 50"),     # 华夏科创50ETF，2020-09 上市
+    "159915": ("创业板",),               # 易方达创业板ETF，2011-09 上市
+}
+
+
+def check_name_anchors(names: dict[str, str]) -> list[str]:
+    """用公开事实校验名称映射；返回不通过的锚点描述（空列表 = 全过）。"""
+    bad = []
+    for code, toks in NAME_ANCHORS.items():
+        nm = names.get(code, "")
+        if not any(t in nm for t in toks):
+            bad.append(f"{code} 应为 {'/'.join(toks)}，实得 '{nm}'")
+    return bad
+
+
 def build_list(refresh_dates: bool = False, crosscheck_nav: int = 0) -> pd.DataFrame:
     """构造 ``data_cache/etf_list.parquet``。
 
@@ -288,13 +340,21 @@ def build_list(refresh_dates: bool = False, crosscheck_nav: int = 0) -> pd.DataF
     store = EtfBarStore()
     em, sn = _live_sources()
 
+    # ⚠️ 必须按行位置配对（_name_map），不能拿 set 去 zip 有序列 —— 详见 _name_map docstring
     names: dict[str, str] = {}
-    if not em.empty and "名称" in em.columns:
-        names.update(dict(zip(
-            _codes_of(em, ("代码",)), em["名称"].astype(str))))
-    if not sn.empty and "名称" in sn.columns:
-        for c, n in zip(_codes_of(sn, ("代码",)), sn["名称"].astype(str)):
-            names.setdefault(c, n)
+    names.update(_name_map(em))
+    for c, n in _name_map(sn).items():
+        names.setdefault(c, n)
+
+    # --- 自检 0（硬）：名称映射的事实锚 ---
+    # 名称错位不会报错、只会给错答案，所以必须在落盘前用公开事实挡住。
+    bad_anchor = check_name_anchors(names)
+    if bad_anchor:
+        print("  ❌ 自检0：名称映射未通过事实锚，清单**拒绝落盘**：")
+        for b in bad_anchor:
+            print(f"      {b}")
+        print("      → 典型原因：又拿 set 去 zip 有序列，或数据源改了列名。")
+        raise SystemExit("名称映射自检失败（NAME_ANCHORS）")
 
     em_codes = _codes_of(em, ("代码",))
     sn_codes = _codes_of(sn, ("代码",))
