@@ -65,6 +65,10 @@ class UniverseSelector:
         self.cache = p if p.is_absolute() else PROJECT_ROOT / p
         self._meta: pd.DataFrame | None = None
         self._cons: pd.DataFrame | None = None
+        self._delisted: pd.DataFrame | None = None
+        self._st_hist: dict[str, pd.Series] | None = None
+        #: 最近一次 ``select(st_mode="daily")`` 因缺 ST 标记文件而回退 snapshot 的只数
+        self._last_st_missing: int = 0
         #: 最近一次 ``select()`` 因 ``in_date > asof`` 被剔除的成分数（诊断用）
         self._last_dropped_after_asof: int = 0
 
@@ -85,6 +89,74 @@ class UniverseSelector:
                 columns=["index_code", "symbol"])
         return self._cons
 
+    @property
+    def delisted_meta(self) -> pd.DataFrame:
+        """退市股元数据（现役池之外的那批）：code → symbol/name/list_date。"""
+        return self._delisted_meta()
+
+    def _delisted_meta(self) -> pd.DataFrame:
+        if self._delisted is not None:
+            return self._delisted
+        p = self.cache / "delisted_list.parquet"
+        if not p.exists():
+            self._delisted = pd.DataFrame()
+            return self._delisted
+        d = pd.read_parquet(p)
+        # ⚠️ 清单里已有带交易所前缀的 `symbol` 列（sh600001）——先丢掉，否则 rename 撞名
+        d = d.drop(columns=[c for c in ("symbol",) if c in d.columns])
+        d = d.rename(columns={"code": "symbol"})
+        d["symbol"] = d["symbol"].astype(str).str.zfill(6)
+        # 快照字段不存在于退市股（且用快照过滤本身就是错的）——留空，
+        # 由 st_mode="daily" 用逐日 isST 处理。
+        for c in ("industry", "board", "is_st", "total_share", "float_share"):
+            if c not in d.columns:
+                d[c] = False if c == "is_st" else ""
+        self._delisted = d
+        return d
+
+    # ------------------------------------------------------- 逐日 ST（时变口径）
+    @property
+    def st_hist(self) -> dict[str, pd.Series]:
+        """全量逐日 ST 状态（懒加载一次）；键 = 裸代码，值 = is_st 序列。"""
+        if self._st_hist is None:
+            d = self.cache / "st_flags"
+            hist: dict[str, pd.Series] = {}
+            if d.exists():
+                for p in d.glob("*.parquet"):
+                    try:
+                        df = pd.read_parquet(p)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if df.empty:
+                        continue
+                    s = pd.Series(df["is_st"].to_numpy(),
+                                  index=pd.to_datetime(df["time"]))
+                    hist[p.stem] = s.sort_index()
+            self._st_hist = hist
+        return self._st_hist
+
+    def _filter_st_daily(self, df: pd.DataFrame, asof) -> pd.DataFrame:
+        """按 ``asof`` 当日的逐日 isST 过滤（缺标记文件则回退 snapshot 规则）。"""
+        hist = self.st_hist
+        a = pd.Timestamp(_to_date(asof)) if asof else None
+        keep, missing = [], 0
+        for sym, is_st_snap, name in zip(df["symbol"].astype(str),
+                                         df.get("is_st", pd.Series(False, index=df.index))
+                                           .fillna(False).astype(bool),
+                                         df["name"].astype(str)):
+            s = hist.get(sym)
+            if s is None or a is None:
+                missing += 1
+                if not is_st_snap and not ("ST" in name or "退" in name):
+                    keep.append(sym)
+                continue
+            sub = s.loc[:a]
+            cur = bool(sub.iloc[-1]) if len(sub) else False
+            if not cur:
+                keep.append(sym)
+        self._last_st_missing = missing
+        return df[df["symbol"].astype(str).isin(set(keep))]
+
     # ---------------------------------------------------------------- 主入口
     def select(
         self,
@@ -96,7 +168,23 @@ class UniverseSelector:
         lookback: int = 20,
         max_symbols: int | None = None,
         require_data: bool = True,
+        st_mode: str = "snapshot",
+        include_delisted: bool = False,
     ) -> list[str]:
+        """选池。
+
+        ⚠️ 时变口径（2026-09-18 新增，**默认关闭以保持既有结论可比**）
+        ------------------------------------------------------------
+        - ``st_mode="snapshot"``（默认）：沿用**当前名称/标记快照**过滤 ST。
+          已知偏差（双向）：① 当年正常、现在 ST 的股票被**整段**剔除；
+          ② 当年 ST、现在摘帽的股票在当年被错误保留；③ 退市股名称带「退」
+          → 按此口径会被整体剔除（而正确做法是只在其 ST 期间剔除）。
+        - ``st_mode="daily"``：按 ``data_cache/st_flags/{code}.parquet`` 的
+          **逐日 isST** 判断 ``asof`` 当日是否 ST（见 ``scripts/fetch_st_flags.py``）。
+          缺该股标记文件时回退 snapshot 规则，并在 ``self._last_st_missing`` 计数。
+        - ``include_delisted=True``：``require_data`` 同时认 ``data_cache/delisted_bars/``，
+          即把已退市股票纳入候选（阶段 1b 的无偏面板）。
+        """
         cfg_u = getattr(self.cfg, "universe", None)
         index = index if index is not None else (cfg_u.index if cfg_u else "hs300")
 
@@ -115,6 +203,14 @@ class UniverseSelector:
                     else (cfg_u.lookback if cfg_u else 20))
 
         df = self.meta.copy()
+        # 0) 并入退市股元数据（可选）：`stock_list.parquet` 只有现役，
+        #    退市股来自 `delisted_list.parquet`（含 list_date/delist_date）。
+        #    这是消除幸存者偏差的前提——没有这一步，退市股连候选都进不来。
+        if include_delisted:
+            ext = self._delisted_meta()
+            if not ext.empty:
+                df = ext if df.empty else pd.concat([df, ext], ignore_index=True)
+                df = df.drop_duplicates(subset=["symbol"], keep="first")
         if df.empty:
             return []
 
@@ -153,14 +249,24 @@ class UniverseSelector:
         # 2) 必须有本地行情
         if require_data:
             bars = self.cache / "bars"
-            df = df[df["symbol"].astype(str).map(lambda s: (bars / f"{s}.parquet").exists())]
+            dbars = self.cache / "delisted_bars"
+
+            def _has(s: str) -> bool:
+                if (bars / f"{s}.parquet").exists():
+                    return True
+                return include_delisted and (dbars / f"{s}.parquet").exists()
+
+            df = df[df["symbol"].astype(str).map(_has)]
 
         # 3) 排除 ST / 退市
         if exclude_st:
-            if "is_st" in df.columns:
-                df = df[~df["is_st"].fillna(False).astype(bool)]
-            name = df["name"].astype(str)
-            df = df[~name.str.contains("ST|退", regex=True, na=False)]
+            if st_mode == "daily":
+                df = self._filter_st_daily(df, asof)
+            else:
+                if "is_st" in df.columns:
+                    df = df[~df["is_st"].fillna(False).astype(bool)]
+                name = df["name"].astype(str)
+                df = df[~name.str.contains("ST|退", regex=True, na=False)]
 
         # 4) 次新股过滤
         if min_list_days and "list_date" in df.columns:
@@ -173,7 +279,8 @@ class UniverseSelector:
 
         # 5) 流动性过滤（需要读行情，较慢，默认只在显式要求时做）
         if min_turnover:
-            syms = self._filter_liquidity(syms, asof, min_turnover, lookback)
+            syms = self._filter_liquidity(syms, asof, min_turnover, lookback,
+                                          include_delisted=include_delisted)
 
         # 6) 规模上限
         if max_symbols and len(syms) > max_symbols:
@@ -182,14 +289,20 @@ class UniverseSelector:
 
     # ---------------------------------------------------------------- 流动性
     def _filter_liquidity(self, symbols: list[str], asof, min_turnover: float,
-                          lookback: int) -> list[str]:
-        """最近 lookback 个交易日日均成交额 >= min_turnover。"""
+                          lookback: int, include_delisted: bool = False) -> list[str]:
+        """最近 lookback 个交易日日均成交额 >= min_turnover。
+
+        ``include_delisted=True`` 时同时认 ``data_cache/delisted_bars/``（退市股）。
+        """
         bars = self.cache / "bars"
+        dbars = self.cache / "delisted_bars"
         out = []
         for s in symbols:
             p = bars / f"{s}.parquet"
             if not p.exists():
-                continue
+                if not include_delisted or not (dbars / f"{s}.parquet").exists():
+                    continue
+                p = dbars / f"{s}.parquet"
             try:
                 df = pd.read_parquet(p, columns=["time", "amount"])
             except Exception:  # noqa: BLE001
