@@ -322,19 +322,26 @@ def main() -> int:
     m_broad = metrics(eq_broad, rf_daily) if eq_broad is not None else {}
     m_hs = metrics(eq_hs, rf_daily) if eq_hs is not None else {}
 
-    # t 列统一口径：报「超额年化的 t」= 日超额均值 t / √(年数)
+    # t 列统一口径：**t = 年化夏普 × √年数**（预注册文档 §2.1 的算术）。
+    #
+    # ⚠️ 修过一次口径 bug（2026-09-18）：旧代码是
+    #        t_daily / √(n/252)
+    #    而 t_daily = X̄√n/s 已经是「年化夏普 × √年数」了，再除 √(年数)
+    #    等于把 t 压低 √年数倍（7.6 年窗口 → 压低 2.76 倍），
+    #    实际报出去的是**年化夏普**，不是 t。t 对线性缩放不变：
+    #        SR_a = (X̄/s)·√252 ，√年数 = √(n/252) ⇒ t = SR_a·√年数 = X̄√n/s
+    #    故这里**直接返回 t_daily**，不再做任何年化换算。
     def ann_t(ex: pd.Series) -> float:
         sd = float(ex.std(ddof=1))
         if sd <= 0:
             return float("nan")
-        t_daily = float(ex.mean()) / (sd / np.sqrt(len(ex)))
-        return t_daily / np.sqrt(len(ex) / TRADING_DAYS)
+        return float(ex.mean()) / (sd / np.sqrt(len(ex)))
 
     def block2(title: str, bench: pd.Series, bm: dict, bench_n: int) -> list[dict]:
         print("\n" + "=" * 82)
         print(f"【{title}】各组等权组合 vs 基准")
         print("⚠️ 绝对年化含幸存者偏差（现役快照），不可引用 → 只看超额列；"
-              "t(超额) = 超额夏普 ÷ √年数 的量级判读")
+              "t(超额) = 超额夏普 × √年数（t 对年化不变，别再除）")
         print("=" * 82)
         hdr = (f"{'组':<10}{'只数':>5}{'年化':>9}{'波动':>8}{'夏普':>8}{'最大回撤':>10}"
                f"{'超额年化':>10}{'超额波动':>10}{'超额夏普':>10}{'t(超额)':>9}")
