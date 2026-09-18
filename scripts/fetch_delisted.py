@@ -175,6 +175,8 @@ def fetch_delisted_list(refresh: bool = False) -> pd.DataFrame:
         cols = list(raw.columns)
         code = next((raw[c] for c in cols if "代码" in c), None)
         name = next((raw[c] for c in cols if "简称" in c or "名称" in c), None)
+        list_col = next((c for c in cols if "上市" in c and "日期" in c and "暂停" not in c
+                         and "终止" not in c), None)
         date_col = next(
             (c for c in cols if "终止上市" in c and "日期" in c),
             next((c for c in cols if "退市" in c and "日期" in c), None))
@@ -186,13 +188,14 @@ def fetch_delisted_list(refresh: bool = False) -> pd.DataFrame:
         df = pd.DataFrame({
             "code": code.astype(str).str.zfill(6),
             "name": name.astype(str) if name is not None else "",
+            "list_date": pd.to_datetime(raw[list_col], errors="coerce") if list_col else pd.NaT,
             "delist_date": pd.to_datetime(raw[date_col], errors="coerce") if date_col else pd.NaT,
             "date_col_note": date_col or "",
             "exchange": exch,
         })
         frames.append(df)
-        print(f"  {exch} 退市清单 {len(df)} 行（日期列 =「{date_col}」，"
-              f"非空 {int(df['delist_date'].notna().sum())} 行）")
+        print(f"  {exch} 退市清单 {len(df)} 行（上市日列 =「{list_col}」/ 退市日列 =「{date_col}」，"
+              f"退市日非空 {int(df['delist_date'].notna().sum())} 行）")
     if not frames:
         raise RuntimeError("沪深两所退市清单都没拿到")
     out = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["code"])
