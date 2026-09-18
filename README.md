@@ -71,6 +71,37 @@ python scripts/factor_research.py --neutralize          # 行业+市值中性化
 # 产出：runtime/factor_research/<时间戳>/{summary.csv, ic_ts.parquet, corr.csv, report.md}
 ```
 
+## 一键启动（本地界面 / 服务）
+
+日常使用**只需要双击 `启动.bat`**，它会起一个进程、自动打开浏览器：
+
+| 用法 | 做什么 |
+|---|---|
+| `启动.bat` | 生产模式：单窗口运行，服务就跑在这个窗口里，**Ctrl+C 或关窗口即停** |
+| `启动.bat dev` | 开发模式：API + Vite 两个窗口，前端改代码热更新 |
+| `启动.bat rebuild` | 先强制重建前端产物，再按生产模式启动 |
+| `启动.bat setup` | 装/更新依赖（后端 pip + 前端 npm） |
+| `启动.bat check` | 只体检并打印报告，**不启动也不停止任何进程** |
+
+可选开关：`-Port 8001` 换端口 · `-NoBrowser` 不自动开浏览器 · `-NoRestart` 发现旧进程也不重启 ·
+`-SkipBuild` 前端产物过期也不自动重建。
+
+它会自动处理三件容易浪费时间的事：
+
+1. **前端产物比源码旧 → 自动重建**（改了 `web/src` 不用记得跑 `npm run build`）；
+2. **端口上跑的是旧代码 → 自动停掉重启**。判据是 `/api/health` 里 `code.backend_stale`
+   —— 它比的是「进程启动那一刻的源码 mtime」与「磁盘当前 mtime」，
+   不是两个进程各自读到的磁盘现值（那样永远相等、比不出来，第一版就错在这里）；
+3. **依赖没装 → 明确提示跑 `启动.bat setup`**，而不是挂在 import 阶段装作"代码坏了"。
+
+> ⚠️ 这些脚本为什么分成 `.bat` + `.ps1` 两层：`cmd` 按**当前代码页**逐字节读 `.bat`，
+> 文件里的 UTF-8 中文会被当成 GBK、字节错位后把命令切碎（`timeout` 变 `meout`、
+> `if not exist` 变 `exist`），报一堆"不是内部或外部命令"；而 **LF 换行**也会让
+> cmd 的解析错位（同一个脚本实测：CRLF 版 8/8 步全部正确，LF 版只剩 4 步且命令被切碎）。
+> 所以根目录的 `启动.bat` 是**纯 ASCII + CRLF**，只负责转发参数给
+> `scripts/launch.ps1`（UTF-8 **带 BOM**，中文在这里打印，走 Unicode 控制台与代码页无关）。
+> 改动 `启动.bat` 时请保持这两个约束。
+
 ## 因子层（P2 / P2.5）
 
 **31 个因子** = 27 个量价 + 1 个规模 + 3 个估值。算法只在 `aq/factors/vlib.py` 实现一次，

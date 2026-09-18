@@ -316,7 +316,14 @@ def t_api() -> None:
     assert r.status_code == 200 and len(r.json()) > 0
 
     r = client.get("/api/market/overview")
-    assert r.status_code == 200 and "up_count" in r.json()
+    assert r.status_code == 200, r.text
+    ov = r.json()
+    # 契约在 2026-09-18「接口真实化」改造后变了：涨跌家数从顶层 up_count
+    # 挪进 breadth（up/down/flat）。这里跟着改 —— 否则自检会一直假红，
+    # 而"自检红着"比"没自检"更糟：它会让人习惯性忽略失败项。
+    assert "breadth" in ov, f"overview 缺 breadth 字段: {sorted(ov)}"
+    assert ov["breadth"]["up"] + ov["breadth"]["down"] > 0, (
+        "全市场快照为空（涨跌家数都是 0）—— 页面会显示假数据，属于硬规则 ③ 的违反")
 
     r = client.get("/api/signals")
     assert r.status_code == 200
@@ -363,7 +370,9 @@ def t_api() -> None:
     r = client.get(f"/api/backtest/{body['run_id']}")
     assert r.status_code == 200
 
-    print(f"        → 信号 {len(signals)} 条 | 回测 {body['run_id']} 通过")
+    # signals 在改造后是「对象」而非裸数组，条目在 signals["signals"] 里
+    print(f"        → 信号 {len(signals.get('signals', []))} 条 "
+          f"(样本 {signals.get('sample_size')} 只) | 回测 {body['run_id']} 通过")
 
 
 # ==========================================================================

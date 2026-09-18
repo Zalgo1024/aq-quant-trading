@@ -2,7 +2,7 @@
 
 接口契约（与前端 ``web/src/types/`` 对齐）：
 
-    GET  /api/health                 系统状态（含数据截至日 / 池规模）
+    GET  /api/health                 系统状态（数据截至日 / 池规模 / 代码版本身份）
     GET  /api/config
     GET  /api/market/overview        全市场总览（真实涨跌家数/分布/三榜/指数）
     GET  /api/market/indices         指数概览（含 60 日 sparkline，缺数据显式标 False）
@@ -102,6 +102,67 @@ def _snapshot() -> MarketSnapshot:
     return _CACHE["snapshot"]
 
 
+def _mt(path: Path) -> str:
+    """文件修改时间（秒级 ISO 字符串）；不存在返回空串（不抛异常）。"""
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds")
+    except OSError:
+        return ""
+
+
+def _disk_fingerprint() -> dict:
+    """磁盘**当前**状态：后端源码最新修改时间 + 前端构建产物。
+
+    ⚠️ 这个值每次调用都重新读盘，所以它单独**不能**用来判断"进程跑的是不是旧代码"——
+      必须与进程启动时的快照比对（见 ``_BOOT_FINGERPRINT``）。
+      前端产物同理：``mount_frontend`` 是按请求从磁盘读文件的，重建前端**不需要重启**
+      （index.html 会指向新的哈希文件）；只有后端源码改动才需要重启。
+    """
+    dist = PROJECT_ROOT / "web" / "dist" / "index.html"
+    asset: str | None = None
+    if dist.exists():
+        text = dist.read_text(encoding="utf-8", errors="ignore")
+        # 从 <script type="module" ... src="/assets/index-<hash>.js"> 取出带哈希的产物名
+        for token in text.split('"'):
+            if "/assets/" in token and token.endswith(".js"):
+                asset = token.rsplit("/", 1)[-1]
+                break
+    # 后端指纹取整个 aq 包 python 文件的最新 mtime —— 只盯 app.py 会漏掉改 snapshot.py 的情况
+    newest = 0.0
+    for py in (PROJECT_ROOT / "aq").rglob("*.py"):
+        try:
+            newest = max(newest, py.stat().st_mtime)
+        except OSError:
+            pass
+    try:
+        if Path(__file__).stat().st_mtime > newest:
+            newest = Path(__file__).stat().st_mtime
+    except OSError:
+        pass
+    return {
+        "backend_mtime": datetime.fromtimestamp(newest).isoformat(timespec="seconds") if newest else "",
+        "dist_asset": asset,
+        "dist_index_mtime": _mt(dist),
+        "dist_present": dist.exists(),
+    }
+
+
+#: 进程启动瞬间的磁盘快照。放模块级只算一次，用来回答
+#: 「我这个进程加载的是哪个版本的代码」。端口上被**改代码之前**启动的旧进程占着，
+#: 是"改动没生效"这类误判最常见的来源（本机实踩过），启动脚本据此决定是否重启。
+_BOOT_FINGERPRINT: dict[str, Any] = dict(_disk_fingerprint())
+_BOOT_FINGERPRINT["boot_time"] = datetime.now().isoformat(timespec="seconds")
+
+
+def _code_identity() -> dict:
+    """给启动脚本用的身份块：进程启动时的快照 + 磁盘现值 + 是否已落后。"""
+    disk = _disk_fingerprint()
+    stale = bool(_BOOT_FINGERPRINT.get("backend_mtime")) and (
+        _BOOT_FINGERPRINT.get("backend_mtime") != disk.get("backend_mtime")
+    )
+    return {"boot": dict(_BOOT_FINGERPRINT), "disk": disk, "backend_stale": stale}
+
+
 # ---------------------------------------------------------------- 基础
 @app.get("/api/health")
 def health() -> dict:
@@ -124,6 +185,8 @@ def health() -> dict:
         "n_liquid": snap_meta.get("n_liquid_snapshot", 0),
         "snapshot_built_at": snap_meta.get("built_at", ""),
         "snapshot_error": snap_meta.get("error", ""),
+        # ↓ 供启动脚本判断"端口上跑的是不是最新代码"
+        "code": _code_identity(),
     }
 
 
