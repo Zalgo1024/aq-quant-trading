@@ -24,6 +24,26 @@ TRANSFER_FEE_RATE = 0.00001
 # 默认滑点（千分之 1）
 DEFAULT_SLIPPAGE = 0.001
 
+#: 资产类别 → 费率**覆盖**。未列出的键一律走上面的模块常量。
+#:
+#: 为什么必须分类：**ETF 免印花税、免过户费**（现实中如此）。原实现对所有
+#: 标的卖出都收 0.05% 印花税（``rules.py`` 旧版第 102 行），用在 ETF 上
+#: 会让「实际成本与预估偏差 < 20%」这条验收判据**直接失败**。
+#:
+#: ⚠️ ``stock`` 的覆盖是**空的** —— 它走模块常量，保证建库以来所有个股
+#: 回测数字与缓存**逐字节不变**。改这个字典时先问一句：动了 stock 吗？
+FEE_OVERRIDES: dict[str, dict[str, float]] = {
+    "stock": {},
+    "etf": {
+        "stamp_tax": 0.0,
+        "transfer_fee": 0.0,
+        # 最低佣金单独可覆盖：用户要去谈「ETF 免最低 5 元」。一个 6250 元的
+        # 单子按万 0.5 本应 0.31 元，被 5 元地板抬成 16 倍 —— 谈成后把这里
+        # 改成 0.0 即可，是**确定性可得**的收益（见 docs/小额实盘方案与判据.md §2.1）。
+        "min_commission": COMMISSION_MIN,
+    },
+}
+
 # --------------------------------------------------------------------------
 # 交易规则
 # --------------------------------------------------------------------------
@@ -95,12 +115,50 @@ def limit_prices(pre_close: float, symbol: str, is_st: bool = False) -> tuple[fl
     return up, down
 
 
-def calc_fees(side_is_sell: bool, price: float, qty: int) -> dict[str, float]:
-    """计算单笔交易费用。"""
+def fee_params(asset_class: str = "stock") -> dict[str, float]:
+    """返回某资产类别的完整费率表（模块常量 + ``FEE_OVERRIDES`` 覆盖）。
+
+    未登记的类别**直接报错**（不静默退化成 stock）—— 一个贴错标签的
+    费率会让回测数字悄悄偏掉，而项目已经为「配置看起来能调、其实调不动」
+    栽过多次（见 ``settings.py`` 的 ``ic_min_icir_ratio`` 注释）。
+    """
+    base = {
+        "commission": COMMISSION_RATE,
+        "min_commission": COMMISSION_MIN,
+        "stamp_tax": STAMP_TAX_RATE,
+        "transfer_fee": TRANSFER_FEE_RATE,
+    }
+    if asset_class not in FEE_OVERRIDES:
+        raise KeyError(
+            f"未知资产类别 {asset_class!r}。已知：{', '.join(sorted(FEE_OVERRIDES))}"
+        )
+    base.update(FEE_OVERRIDES[asset_class])
+    return base
+
+
+def calc_fees(
+    side_is_sell: bool,
+    price: float,
+    qty: int,
+    asset_class: str = "stock",
+) -> dict[str, float]:
+    """计算单笔交易费用。
+
+    ``asset_class="stock"``（默认）**逐字复刻**历史实现：佣金
+    ``max(额×万2.5, 5元)``、印花税仅卖出 0.05%、过户费万 0.1。
+    ``asset_class="etf"`` 则免印花税与过户费。
+
+    ⚠️ **不要用「代码段」自动推断资产类别**。实测反例：``510080`` /
+    ``510081``（2004 年成立）、``560002``（2006）、``560003``（2007）代码
+    都落在 ETF 段，但它们是与 ETF 同代码段的**普通开放式基金**
+    （见 ``scripts/probes/probe_etf_reach.py`` 第 2 段）。
+    类别必须由调用方显式给出（ETF 池成员关系来自 ``etf_list.parquet``）。
+    """
+    p = fee_params(asset_class)
     turnover = price * qty
-    commission = max(turnover * COMMISSION_RATE, COMMISSION_MIN)
-    stamp = turnover * STAMP_TAX_RATE if side_is_sell else 0.0
-    transfer = turnover * TRANSFER_FEE_RATE
+    commission = max(turnover * p["commission"], p["min_commission"])
+    stamp = turnover * p["stamp_tax"] if side_is_sell else 0.0
+    transfer = turnover * p["transfer_fee"]
     return {
         "commission": round(commission, 2),
         "stamp_tax": round(stamp, 2),

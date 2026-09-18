@@ -54,6 +54,20 @@ class SimGateway(TradingGateway):
         self._persist_path: Path | None = None
         self._t1_locked: dict[str, int] = {}   # symbol -> 当日买入未解冻数量
         self._last_trade_date: str = ""
+        #: symbol -> 资产类别（"stock" / "etf"），决定费率口径。
+        #: **默认空 = 全部按 stock**，保证既有个股回测逐字不变。
+        #: ⚠️ 不要用「代码段」自动推断 ETF：510080/560002 这类代码落在 ETF 段
+        #: 却是普通开放式基金（见 scripts/probes/probe_etf_reach.py 第 2 段）。
+        #: ETF 路线必须显式注入（成员关系来自 data_cache/etf_list.parquet）。
+        self._asset_class: dict[str, str] = {}
+
+    # ------------------------------------------------------------ 资产类别
+    def set_asset_class_map(self, mapping: dict[str, str]) -> None:
+        """注入 symbol → 资产类别映射（ETF 路线用）。默认不注入 = 全是 stock。"""
+        self._asset_class = {str(k): str(v) for k, v in mapping.items()}
+
+    def _class_of(self, symbol: str) -> str:
+        return self._asset_class.get(str(symbol), "stock")
 
     # ------------------------------------------------------------ 连接/持久化
     def connect(self, cfg: "Settings") -> None:
@@ -195,8 +209,9 @@ class SimGateway(TradingGateway):
 
         # --- 6) 资金/持仓校验 ---
         qty = order.qty
+        asset_class = self._class_of(order.symbol)
         if order.side == Side.BUY:
-            fees = calc_fees(False, fill_px, qty)
+            fees = calc_fees(False, fill_px, qty, asset_class=asset_class)
             need = round(fill_px * qty + sum(fees.values()), 2)
             if need > self.account.cash:
                 # 资金不足时按可买数量缩量（向下取整到 100 股）
@@ -213,7 +228,7 @@ class SimGateway(TradingGateway):
                 qty = avail  # 缩量到可用数量
 
         # --- 7) 更新账户与持仓 ---
-        fees = calc_fees(order.side == Side.SELL, fill_px, qty)
+        fees = calc_fees(order.side == Side.SELL, fill_px, qty, asset_class=asset_class)
         turnover = round(fill_px * qty, 2)
         pos = self.account.positions.get(order.symbol)
         if pos is None:

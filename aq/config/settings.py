@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -219,6 +219,51 @@ class ModelConfig(BaseModel):
     ic_raw_summary_path: str = ""
 
 
+class EtfConfig(BaseModel):
+    """ETF 路线配置（2026-09-18 新增）。
+
+    为什么**不复用** ``universe`` / ``risk``
+    ---------------------------------------
+    那些字段是给**股票池**标定的：单票 10%、行业 30%、总仓 95%、回撤 20%、
+    上市满 180 天 + 近 20 日日均成交额 ≥ 2e7。而 ETF 路线要的是
+    「2~5 只、回撤 ≤10%、季度再平衡」——**两者直接冲突**。
+    改现有字段的默认值会污染建库以来所有个股结论与缓存，
+    所以独立一节，并默认 ``enabled=False``（不碰个股路线）。
+
+    口径警告（**必须知情，否则会误读结果**）
+    --------------------------------------
+    免费源拿不到已退市/已清盘 ETF 的清单与行情（腾讯 ``IndexError``、
+    新浪空；东财名录也不含已终止产品）。因此 ``pit_mode`` 目前**只有
+    ``live_only`` 一个可选项** —— 池子天然带幸存者偏差，方向单一（只高估）。
+    偏差上界见 ``scripts/probes/probe_etf_survivorship.py``：
+    最保守 1.80pp/年、中值约 0.56pp/年、计入流动性抵消约 0.19pp/年。
+    → 产物必须带 ``universe_caliber="live_only_biased"``，
+      **绝对收益数字一律不可引用**；只有"相对同池等权"的超额有意义。
+    """
+
+    enabled: bool = False
+    universe: str = "all"                 # all（现役全池）| core（宽基+红利+债券）
+    min_list_days: int = 180              # 上市不足 N 个自然日不参与
+    min_amount: float = 5_000_000.0       # 近 lookback 日日均成交额下限（元）
+    lookback: int = 20
+    #: 池口径。**唯一合法值是 live_only**：免费源拿不到退市 ETF 清单
+    #: （见 ``scripts/probes/probe_etf_reach.py`` 第 2/4 段）。
+    #: 用 Literal 而不是 str，是为了让拼错的名字**响亮地报错**，
+    #: 而不是静默退化成默认值 —— 项目为这类"安静降级"栽过多次。
+    pit_mode: Literal["live_only"] = "live_only"
+    rebalance_days: int = 60              # 季度 ≈ 60 交易日
+    target_equity: float = 0.25           # 权益暴露上限，由 10% 回撤预算反解
+    holdings_max: int = 5                 # 持仓只数上限（5 元最低佣金约束）
+    #: 现金/短债那一档的名义收益率。阶段 0 §1.2 用的是 2%/年的**假设值**；
+    #: 用 511010 国债ETF 的真实全收益可以替换（见
+    #: ``scripts/probes/probe_etf_total_return.py``）。
+    cash_yield: float = 0.02
+    #: ⚠️ ETF 最低佣金**不在这里配** —— 唯一来源是
+    #: ``aq.core.rules.FEE_OVERRIDES["etf"]["min_commission"]``。
+    #: 两处可配 = 迟早只改一处，属于项目明令避免的"配置看起来能调、其实调不动"。
+    #: 谈成"免最低 5 元"后改那个常量一个数即可。
+
+
 class FrontendConfig(BaseModel):
     theme: str = "dark"
     up_color: str = "red"
@@ -239,6 +284,7 @@ class Settings(BaseModel):
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     model: ModelConfig = Field(default_factory=ModelConfig)
+    etf: EtfConfig = Field(default_factory=EtfConfig)
     frontend: FrontendConfig = Field(default_factory=FrontendConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
 

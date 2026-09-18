@@ -80,3 +80,35 @@ execution:
   account_id: sim
   persist_path: runtime/sim_account.json
   poll_interval: 3.0
+
+# ---------------------------------------------------------------------------
+# ETF 路线（2026-09-18 新增）
+#
+# 为什么独立一节、而不用上面的 universe / risk：
+#   那些是给**股票池**标定的（单票 10%、总仓 95%、回撤 20%、成交额 2e7），
+#   与「2~5 只 ETF、回撤 ≤10%、季度再平衡」**直接冲突**。
+#   改它们的默认值会污染建库以来所有个股结论，所以这里默认 enabled: false。
+#
+# 怎么启用：`load_settings(path="config/etf.yaml")`（base + etf 深合并），
+#   不要新增 RunMode —— 现有的 backtest/paper/live 是运行模式，不是资产类别。
+#
+# ⚠️ 池口径警告：免费源拿不到已退市/已清盘 ETF 的清单与行情，
+#   所以 pit_mode 只有 live_only 一个选项，池子天然带**单向**幸存者偏差。
+#   偏差上界：最保守 1.80pp/年、中值 0.56pp/年、计入流动性抵消 0.19pp/年
+#   （见 scripts/probes/probe_etf_survivorship.py）。
+#   → 产物必须带 universe_caliber="live_only_biased"，**绝对收益不可引用**。
+# ---------------------------------------------------------------------------
+etf:
+  enabled: false            # 个股路线行为逐字不变；ETF 路线在 config/etf.yaml 里打开
+  universe: all             # all（现役全池，含主题/跨境）| core（宽基+红利+债券）
+  min_list_days: 180        # 上市不足 180 日不参与
+  min_amount: 5000000.0     # 近 20 日日均成交额下限（元）；ETF 流动性远好于个股
+  lookback: 20
+  pit_mode: live_only       # 唯一合法值（见上方警告）
+  rebalance_days: 60        # 季度 ≈ 60 交易日（复用 backtest.rebalance_days 的语义）
+  target_equity: 0.25       # 权益暴露上限（10% 回撤预算反解，阶段 0 §1.1）
+  holdings_max: 5           # 持仓只数上限（5 元最低佣金约束，阶段 0 §2.1）
+  cash_yield: 0.02          # 现金/短债档名义收益（可用 511010 真实全收益替换）
+  # 注意：ETF 最低佣金**不在**这里配，唯一来源是
+  # aq/core/rules.py 的 FEE_OVERRIDES["etf"]["min_commission"]。
+  # 两处可配 = 迟早只改一处。

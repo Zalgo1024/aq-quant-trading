@@ -1,0 +1,46 @@
+# ETF 路线配置（在 config/base.yaml 之上深合并）
+#
+# 用法：load_settings(path="config/etf.yaml")
+#   不要新增 RunMode —— 现有的 backtest/paper/live 是运行模式，不是资产类别。
+#
+# 这一份配置的形状由两个硬约束反解而来，不要随手改：
+#   1. 回撤 ≤ 10%  → target_equity 只能 0.25（阶段 0 §1.1 反解）
+#   2. 本金 < 5 万 → holdings_max ≤ 5、rebalance_days ≥ 60（阶段 0 §2.1）
+#
+# ⚠️ 池口径：免费源拿不到已退市 ETF 的清单与行情 → 池子带**单向**幸存者偏差。
+#    绝对收益不可引用，只有"相对同池等权"的超额有意义。
+
+mode: paper
+
+etf:
+  enabled: true
+  # core = 宽基 + 红利 + 红利低波 + 债券。先跑 core 验证管线，
+  # 再切 all（全市场 1674 只，拉数约 1.6 小时）。
+  universe: core
+  min_list_days: 180
+  # ETF 流动性远好于个股，500 万/日 是个温和门槛；
+  # 不要提到 1 亿 —— 个股侧就栽过"单日门槛 vs 20 日均值差 5 倍、
+  # 把仓位压到 27%"那次（见 RiskConfig 注释）。
+  min_amount: 5000000.0
+  lookback: 20
+  pit_mode: live_only
+  rebalance_days: 60
+  target_equity: 0.25
+  holdings_max: 5
+  cash_yield: 0.02
+
+# ETF 路线不跑因子面板（那 31 个因子是个股横截面的产物），
+# 所以 model 的 IC 定权相关字段在这里**显式关掉**，
+# 避免"读了一份个股 summary.csv 给 ETF 打分"这种贴错标签的回测。
+model:
+  weight_source: prior
+  score_neutralize: false
+
+# 基准：ETF 路线的零假设不是"跑赢沪深300"，而是等权持有同一个可见池。
+# 这里留沪深300 只作参照，判据里不用它。
+backtest:
+  benchmark: "000300"
+  start: "2005-01-01"
+  end: "2026-09-15"
+  # 现金池 5 万量级（用户本金 < 5 万）
+  initial_cash: 50000.0

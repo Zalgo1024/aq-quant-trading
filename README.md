@@ -401,6 +401,25 @@ E = R - B        # R 此时已是「策略 − rf」，B 是【原始】基准�
 | `index_constituents.parquet` | 沪深300(300) / 中证500(500) / 上证50(50) / 中证1000(1000) |
 | `calendar.parquet` | 交易日历 8797 天（1990-12-19 ~ 2026-12-31） |
 
+### ETF 侧（阶段 1a，2026-09-18）
+
+| 文件 | 内容 |
+|---|---|
+| `etf_nav/{symbol}.parquet` | 净值：`time / unit_nav / cum_nav / nav_ret(小数)` —— **全收益的唯一权威来源** |
+| `etf_bars/{symbol}.parquet` | 日线（价格口径）+ `split_factor` / `adj_close` |
+| `etf_actions.parquet` | 份额折算事件（`factor` / `r_px` / `r_total` / `ret_src` / `ret_unit`） |
+
+⚠️ **ETF 的二级市场价格不是收益序列**：它含分红除权（510880 每年约 5%）
+与份额折算（512890 在 2021-10-25 做 1:2 拆分，价格单日 −51.13%）。
+全收益一律取基金公司公布的**官方「日增长率」**（`EtfNavStore.total_return`）——
+含分红、折算中性。裁决过程、入库不变量与两个"判定正确但数值错 100 倍、不报错"的坑，
+见 [docs/ETF数据层与全收益口径.md](docs/ETF数据层与全收益口径.md)。
+
+```bash
+python scripts/fetch_etf.py --group core --nav --actions   # 18 只 core，约 1 分钟
+python scripts/probes/probe_etf_guard_roundtrip.py         # 改口径代码后必跑（三段验收）
+```
+
 ## 目录
 
 ```
@@ -409,6 +428,7 @@ aq_project/
 │  ├─ core/         # 领域模型：Order/Fill/Account/Position/Bar/Signal + 枚举
 │  ├─ config/       # 配置加载（yaml + 环境变量覆盖）
 │  ├─ data/         # 数据层：Provider 抽象 + akshare/tushare/mock 实现 + 存储
+│  │                #   etf_store/etf_actions：ETF 净值与全收益口径（见对应文档）
 │  ├─ factors/      # 因子计算 / 中性化 / IC 检验 / walk-forward / 面板
 │  ├─ models/       # ⚠️ 占位骨架：截面/时序/情绪模型 + 训练推理接口，**零调用点**（P3 未做）
 │  ├─ portfolio/    # 组合构建 + 风控引擎
@@ -416,11 +436,12 @@ aq_project/
 │  ├─ backtest/     # 回测引擎（复用 SimGateway 撮合）+ CSCV/PBO/DSR 防过拟合
 │  ├─ api/          # FastAPI 服务
 │  └─ smoke_test.py # 自包含端到端冒烟测试
-├─ config/          # base.yaml / paper.yaml / backtest.yaml / live.example.yaml
-├─ scripts/         # 数据拉取/质检/修复、因子研究、CSCV、分组诊断
+├─ config/          # base.yaml / paper.yaml / backtest.yaml / live.example.yaml / etf.yaml
+├─ scripts/         # 数据拉取/质检/修复、因子研究、CSCV、分组诊断、ETF 管道
 │  └─ probes/       # 研究探针（只读）：支撑文档结论的可复现脚本，见其 README
 ├─ web/             # React + Vite + ECharts 前端（红涨绿跌、¥）
-├─ docs/            # 技术设计文档、开发计划、因子研究报告、收益来源候选、终局诊断、小额实盘方案
+├─ docs/            # 技术设计文档、开发计划、因子研究报告、收益来源候选、终局诊断、
+│                   #   小额实盘方案、ETF 数据层与全收益口径
 └─ sql/             # PostgreSQL/TimescaleDB schema
 ```
 
