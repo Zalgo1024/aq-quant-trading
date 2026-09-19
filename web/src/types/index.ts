@@ -262,6 +262,13 @@ export interface HealthInfo {
   n_liquid: number
   snapshot_built_at: string
   snapshot_error: string
+  /** 代码身份块：boot = 进程启动那一刻的磁盘快照，disk = 磁盘现值。
+   *  backend_stale=true 说明端口上跑的还是旧代码（启动器会自动重启）。 */
+  code?: {
+    boot?: Record<string, unknown>
+    disk?: Record<string, unknown>
+    backend_stale?: boolean
+  }
 }
 
 export interface QuotesResponse {
@@ -308,6 +315,11 @@ export interface Stage {
   progress: number
   n_items: number
   n_done: number
+  /** 人工维护的路线结论（在 docs/研究进展.json 里写，接口原样透传）。
+   *  如 "已否决" / "完成" / "进行中"；缺省时前端退化为按 progress 推断。 */
+  outcome?: string
+  /** 结论的一句话理由，用作悬停说明 */
+  outcome_reason?: string
 }
 
 export interface Verdict {

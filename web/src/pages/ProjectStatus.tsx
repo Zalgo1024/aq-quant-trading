@@ -34,6 +34,15 @@ const STATUS_ICON: Record<string, React.ReactNode> = {
   todo: <ClockCircleTwoTone twoToneColor="#8c8c8c" />,
 }
 
+// 路线级结论（人工写在 docs/研究进展.json 的 outcome 字段）。
+// 与"条目进度"是两件事：B 的 5 个条目全做完了（100%），但 B 这条**路线**被否决了。
+// 只显示进度条会读成"B 成功了"，所以这里并列一个结论徽章。
+const ROUTE_DEAD = /否决|失败|封存/
+
+function routeChip(outcome: string): { cls: string } {
+  return { cls: ROUTE_DEAD.test(outcome) ? 'chip-mid' : 'chip-ok' }
+}
+
 export default function ProjectStatus() {
   const { data, isLoading } = useQuery({
     queryKey: ['project-status'],
@@ -188,6 +197,14 @@ export default function ProjectStatus() {
             <Space size={8}>
               <Tag color="blue">{s.id}</Tag>
               {s.name}
+              {s.outcome && (
+                <Tooltip title={s.outcome_reason || s.goal}>
+                  <span className={`chip ${routeChip(s.outcome).cls}`} style={{ cursor: 'help' }}>
+                    <i />
+                    {s.outcome}
+                  </span>
+                </Tooltip>
+              )}
               <Typography.Text type="secondary" style={{ fontSize: 12, fontWeight: 400 }}>
                 {s.goal}
               </Typography.Text>
@@ -195,12 +212,18 @@ export default function ProjectStatus() {
           }
           extra={
             <Space size={12}>
-              <Progress
-                percent={Math.round(s.progress * 100)}
-                size="small"
-                style={{ width: 140 }}
-                strokeColor={s.items.some((i) => i.status === 'blocked') ? '#faad14' : '#1668dc'}
-              />
+              {!s.outcome || !ROUTE_DEAD.test(s.outcome) ? (
+                <Progress
+                  percent={Math.round(s.progress * 100)}
+                  size="small"
+                  style={{ width: 140 }}
+                  strokeColor={s.items.some((i) => i.status === 'blocked') ? '#faad14' : '#1668dc'}
+                />
+              ) : (
+                <span style={{ fontSize: 12, color: '#8c8c8c' }}>
+                  路线已封存 · 条目 {s.n_done}/{s.n_items} 已做完
+                </span>
+              )}
               <span style={{ fontSize: 12, color: '#8c8c8c' }}>
                 {s.n_done}/{s.n_items} 项完成
               </span>

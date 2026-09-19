@@ -1,5 +1,62 @@
-:root {
+/* ------------------------------------------------------------------
+   全局样式与主题变量
+   ------------------------------------------------------------------
+   颜色全部走 CSS 变量，由 <html data-theme="light|dark"> 切换。
+   写组件时**不要再硬编码 hex**，否则切主题就会失配。
+   例外：ECharts 读不到 CSS 变量，走 `theme/tokens.ts` 的 useChartColors()。
+
+   红绿语义（A 股口径，硬约定）：涨 = 红，跌 = 绿。
+   为了不和红绿冲突，「可信度 / 状态」一律用**明度与填充**表达，不用色相。
+   ------------------------------------------------------------------ */
+
+:root,
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --aq-up: #cf1322;
+  --aq-down: #389e0d;
+  --aq-flat: #8c8c8c;
+
+  --aq-text: rgba(0, 0, 0, 0.88);
+  --aq-text-2: rgba(0, 0, 0, 0.65);
+  --aq-text-3: rgba(0, 0, 0, 0.45);
+
+  --aq-border: rgba(0, 0, 0, 0.15);
+  --aq-border-strong: rgba(0, 0, 0, 0.28);
+
+  --aq-page-bg: #f5f5f7;
+  --aq-surface: #ffffff;
+  --aq-surface-2: #fafafa;
+  --aq-chrome-bg: #ffffff;
+
+  /* 可信度三态：实心 / 半实心 / 空心 —— 明度区分，不占色相 */
+  --aq-cred-strong: rgba(0, 0, 0, 0.88);
+  --aq-cred-mid: rgba(0, 0, 0, 0.32);
+  --aq-cred-ring: rgba(0, 0, 0, 0.32);
+}
+
+:root[data-theme='dark'] {
   color-scheme: dark;
+
+  --aq-up: #f5222d;
+  --aq-down: #52c41a;
+  --aq-flat: #8c8c8c;
+
+  --aq-text: rgba(255, 255, 255, 0.85);
+  --aq-text-2: rgba(255, 255, 255, 0.65);
+  --aq-text-3: rgba(255, 255, 255, 0.45);
+
+  --aq-border: rgba(255, 255, 255, 0.15);
+  --aq-border-strong: rgba(255, 255, 255, 0.28);
+
+  --aq-page-bg: #141414;
+  --aq-surface: #1f1f1f;
+  --aq-surface-2: #171717;
+  --aq-chrome-bg: #1f1f1f;
+
+  --aq-cred-strong: rgba(255, 255, 255, 0.85);
+  --aq-cred-mid: rgba(255, 255, 255, 0.30);
+  --aq-cred-ring: rgba(255, 255, 255, 0.30);
 }
 
 * {
@@ -17,35 +74,105 @@ body,
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
     'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
-  background: #141414;
-  color: #e8e8e8;
+  background: var(--aq-page-bg);
+  color: var(--aq-text);
 }
 
-/* A 股配色：红涨绿跌 */
+/* ---- 涨跌（红涨绿跌）---- */
 .up {
-  color: #f5222d;
+  color: var(--aq-up);
 }
 
 .down {
-  color: #52c41a;
+  color: var(--aq-down);
 }
 
 .flat {
-  color: #8c8c8c;
+  color: var(--aq-flat);
 }
 
+/* ---- 状态/可信度徽章：三态靠填充/明度，不靠色相 ----
+   全站复用同一套"状态词汇"，这样红色永远只表示"涨"、绿色永远只表示"跌"，
+   不会出现"这个红色标签到底是涨还是已证伪"的歧义。
+   实心=确定/可引用 · 半实心=有保留 · 空心=缺失/待开始 */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--aq-text-3);
+  border: 0.5px solid var(--aq-border);
+  border-radius: 10px;
+  padding: 1px 7px;
+  white-space: nowrap;
+}
+
+.chip > i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+  flex: none;
+}
+
+.chip-ok > i {
+  background: var(--aq-cred-strong);
+}
+
+.chip-mid > i {
+  background: var(--aq-cred-mid);
+}
+
+.chip-none > i {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--aq-cred-ring);
+}
+
+/* ---- 通用 ---- */
 .risk-banner {
   background: rgba(250, 173, 20, 0.12);
   border: 1px solid rgba(250, 173, 20, 0.35);
-  color: #faad14;
+  color: #d48806;
   padding: 6px 12px;
   border-radius: 4px;
   font-size: 12px;
   line-height: 1.5;
 }
 
+:root[data-theme='dark'] .risk-banner {
+  color: #faad14;
+}
+
 .mono {
   font-family: 'SF Mono', Consolas, 'Courier New', monospace;
+}
+
+/* 线框/占位块（骨架期用） */
+.wf {
+  border: 0.5px dashed var(--aq-border-strong);
+  border-radius: 8px;
+  color: var(--aq-text-3);
+  font-size: 12px;
+}
+
+/* 首页：主栏 + 右栏（下一步 / 数据健康）。窄屏收成单列。 */
+.home-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 12px;
+  align-items: start;
+}
+
+@media (max-width: 1100px) {
+  .home-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* 卡内行的分隔线（首行不加） */
+.rowdiv + .rowdiv {
+  border-top: 0.5px solid var(--aq-border);
 }
 
 /* 滚动条 */
@@ -54,7 +181,7 @@ body {
   height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #3a3a3a;
+  background: var(--aq-border-strong);
   border-radius: 4px;
 }
 ::-webkit-scrollbar-track {
