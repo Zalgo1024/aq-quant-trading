@@ -16,6 +16,8 @@
   --aq-up: #cf1322;
   --aq-down: #389e0d;
   --aq-flat: #8c8c8c;
+  /* 警示（非涨跌语义）。浅色下用深一档，否则 #faad14 在白底上对比度不够。 */
+  --aq-warn: #d48806;
 
   --aq-text: rgba(0, 0, 0, 0.88);
   --aq-text-2: rgba(0, 0, 0, 0.65);
@@ -41,6 +43,7 @@
   --aq-up: #f5222d;
   --aq-down: #52c41a;
   --aq-flat: #8c8c8c;
+  --aq-warn: #faad14;
 
   --aq-text: rgba(255, 255, 255, 0.85);
   --aq-text-2: rgba(255, 255, 255, 0.65);
@@ -129,6 +132,25 @@ body {
   box-shadow: inset 0 0 0 1px var(--aq-cred-ring);
 }
 
+/* 严重度三态（表格里的「级别」列）。仍然不用色相，但改成**整块填充强度**：
+   6px 圆点的明暗差在密集表格里基本看不出来，等于没表达。
+   实心 = 严重 · 半填充 = 警告 · 空心 = 提示。 */
+.chip.sev-3 {
+  background: var(--aq-cred-strong);
+  color: var(--aq-page-bg);
+  border-color: transparent;
+}
+
+.chip.sev-2 {
+  background: var(--aq-cred-mid);
+  color: var(--aq-text);
+  border-color: transparent;
+}
+
+.chip.sev-1 {
+  color: var(--aq-text-3);
+}
+
 /* ---- 通用 ---- */
 .risk-banner {
   background: rgba(250, 173, 20, 0.12);
@@ -146,6 +168,32 @@ body {
 
 .mono {
   font-family: 'SF Mono', Consolas, 'Courier New', monospace;
+}
+
+/* 次级 / 三级文字。不要在组件里硬编码 #8c8c8c ——
+   它在浅色下勉强能用，但切到深色就偏低对比，而这两个变量会跟着主题走。 */
+.dim {
+  color: var(--aq-text-3);
+}
+
+.dim2 {
+  color: var(--aq-text-2);
+}
+
+/* 代码 / JSON / 命令块。旧实现把背景硬编码成 #1a1a1a：
+   浅色主题下一页中间杵着几块黑框，且里面的 #bbb 正文与白底卡片不属于同一套视觉。 */
+.codeblock {
+  background: var(--aq-surface-2);
+  border: 0.5px solid var(--aq-border);
+  color: var(--aq-text-2);
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.7;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* 线框/占位块（骨架期用） */

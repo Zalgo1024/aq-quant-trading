@@ -18,6 +18,9 @@
  6. 回测引擎全流程 + 绩效指标
  7. API 关键端点（health / market / signals / factor / anomaly / account / backtest）
  8. 实盘适配器壳的正确报错
+ 9. 防过拟合统计（CSCV / PBO / DSR / N_eff）的标定
+10. Walk-forward 定权的前视偏差（公式 / 因果 / 节奏三层）
+11. 探针台账与磁盘的一致性 + 漂移检测的负对照
 
 环境说明：本机若注入了 safe-delete shim，脚本只在**自身子进程**层面处理，
 不修改机器上的任何全局配置。
@@ -500,6 +503,83 @@ def t_wf_lookahead() -> None:
 
 
 # ==========================================================================
+# 11. 探针台账：登记 ↔ 磁盘的一致性，**含负对照**
+# ==========================================================================
+
+
+def t_probe_registry() -> None:
+    """探针台账必须与磁盘一致，且**漂移检测必须真的会报**。
+
+    为什么这一项要带负对照
+    ----------------------
+    一个"永远返回无漂移"的检查器会安静地通过所有测试 —— 它什么都不检查，
+    却给出最大的安慰。所以这里往台账里插一条**虚构的脚本名**，
+    断言它必须出现在 ``missing`` 里；不出现就说明漂移比对根本没在工作。
+
+    负对照只改**临时目录里的 README 副本**（并把模块级常量临时指过去），
+    不触碰仓库里的任何真实文件。
+    """
+    import tempfile
+    from pathlib import Path
+
+    from aq.api import probes as P
+
+    d = P.probe_registry()
+    assert d["available"], f"台账不可用：{d.get('reason')}"
+
+    # (a) 磁盘上都得有：清单有的、磁盘没有 = 文档在引用不存在的证据
+    assert not d["missing"], f"清单有但磁盘无：{d['missing']}"
+    # (b) 每条的规模都读得出来（说明按行位置解析没错位、文件真的可读）
+    bad = [e["script"] for e in d["entries"] if not e["exists"] or e["n_lines"] <= 0]
+    assert not bad, f"这些探针读不出内容：{bad}"
+    # (c) 支撑最重结论的那几个必须在册 —— 台账漏掉它们等于漏掉项目的核心证据
+    names = {e["script"] for e in d["entries"]}
+    for must in (
+        "probe_survivorship_corrected.py",
+        "probe_divyield_factor_alpha.py",
+        "probe_etf_rotation.py",
+        "probe_limit_field_bias.py",
+    ):
+        assert must in names, f"关键探针未登记：{must}"
+    # (d) 大多数条目要能点回文档。不要求 100%：有的探针本就不支撑文档结论
+    #     （如 dump_etf_event.py 是调试用），要求全解析等于逼人去编引用。
+    assert d["n_resolved_doc"] >= d["n_registered"] - 2, (
+        f"可解析文档只有 {d['n_resolved_doc']}/{d['n_registered']}，"
+        "文档解析多半退化了")
+    # (e) 三份结构化小节都要解析出来（否则页面会静默少掉整块内容）
+    assert len(d["conventions"]) >= 3, f"「三条约定」解析出 {len(d['conventions'])} 条"
+    assert len(d["pitfalls"]) >= 3, f"「通用陷阱」解析出 {len(d['pitfalls'])} 条"
+    assert d["prereq"].strip(), "「前置条件」命令块为空"
+
+    # --- 负对照：插一条虚构脚本名，漂移必须被抓到 ---
+    text = P.README.read_text(encoding="utf-8")
+    bogus = "probe_negative_control_does_not_exist.py"
+    assert "| `segment_consistency.py`" in text, "README 表头结构变了，负对照无法注入"
+    text2 = text.replace(
+        "| `segment_consistency.py`",
+        f"| `{bogus}` | 负对照，不应存在 | — | — |\n| `segment_consistency.py`",
+        1,
+    )
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td) / "README.md"
+        tmp.write_text(text2, encoding="utf-8")
+        old = P.README
+        P.README = tmp
+        try:
+            d2 = P.probe_registry()
+        finally:
+            P.README = old
+    assert bogus in d2["missing"], (
+        f"漂移检测没工作：虚构的 {bogus} 没被抓进 missing（missing={d2['missing']}）")
+    assert bogus not in d2["unregistered"], "虚构条目不该出现在 unregistered（方向反了）"
+    assert len(d2["entries"]) == len(d["entries"]) + 1, "注入的条目没被解析进 entries"
+
+    print(f"        → 台账 {d['n_registered']} 条（磁盘 {d['n_on_disk']} 个 .py）"
+          f"｜可点回文档 {d['n_resolved_doc']} 条｜漂移 {len(d['missing'])}/{len(d['unregistered'])}"
+          f"｜负对照已捕获")
+
+
+# ==========================================================================
 # main
 # ==========================================================================
 
@@ -519,6 +599,7 @@ def main() -> int:
     check("8. 实盘适配器壳正确报错", t_live_shell)
     check("9. 防过拟合统计标定（PBO 零假设≈0.5 / DSR / N_eff）", t_cscv)
     check("10. Walk-forward 定权的前视偏差（公式/因果/节奏三层）", t_wf_lookahead)
+    check("11. 探针台账一致性与漂移检测（含负对照）", t_probe_registry)
 
     print("-" * 70)
     passed = sum(1 for _, ok, _ in _results if ok)

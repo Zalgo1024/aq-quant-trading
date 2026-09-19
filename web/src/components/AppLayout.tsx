@@ -14,7 +14,9 @@ import {
   DashboardOutlined,
   ExperimentOutlined,
   FileSearchOutlined,
+  FundOutlined,
   LineChartOutlined,
+  SettingOutlined,
   UnorderedListOutlined,
 } from '@ant-design/icons'
 import { Link, Outlet, useLocation } from 'react-router-dom'
@@ -43,9 +45,12 @@ const NAV = [
   {
     group: '实验',
     items: [
+      // 实验室排在实验区第一位：动手之前先看「已经做过什么、怎么做死的」，
+      // 比直接看当日打分榜有用得多。
+      { key: '/lab', label: '实验室', icon: <ExperimentOutlined /> },
       { key: '/signals', label: '因子打分', icon: <LineChartOutlined /> },
-      { key: '/anomaly', label: '异动预警', icon: <AlertOutlined /> },
-      { key: '/backtest', label: '回测研究', icon: <ExperimentOutlined /> },
+      { key: '/anomaly', label: '异动扫描', icon: <AlertOutlined /> },
+      { key: '/backtest', label: '回测研究', icon: <BarChartOutlined /> },
     ],
   },
 ]
@@ -86,28 +91,61 @@ export default function AppLayout() {
           borderRight: '0.5px solid var(--aq-border)',
         }}
       >
-        <div
-          style={{
-            height: 56,
-            display: 'flex',
-            alignItems: 'center',
-            paddingLeft: 20,
-            color: 'var(--aq-text)',
-            fontWeight: 500,
-            fontSize: 14,
-            letterSpacing: 0.5,
-          }}
-        >
-          <BarChartOutlined style={{ marginRight: 8 }} />
-          AI 量化研究台
+        {/* 侧栏做成纵向 flex：导航在上，运维入口（后台）沉底。
+            「后台」不属于研究流程，但又不能完全藏起来 ——
+            沉到最底部是"在但不用看"的正确位置。
+
+            它原来挂在顶部状态条的右上角，和主题开关、版本号挤在一起；
+            而状态条要回答的是「走到哪一步 / 数据多新 / 有没有故障」，
+            运维入口混在里面会稀释那三个问题。 */}
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+          <div
+            style={{
+              height: 56,
+              display: 'flex',
+              alignItems: 'center',
+              paddingLeft: 20,
+              color: 'var(--aq-text)',
+              fontWeight: 500,
+              fontSize: 14,
+              letterSpacing: 0.5,
+              flex: 'none',
+            }}
+          >
+            <FundOutlined style={{ marginRight: 8 }} />
+            AI 量化研究台
+          </div>
+          <Menu
+            theme={dark ? 'dark' : 'light'}
+            mode="inline"
+            selectedKeys={selected ? [selected] : []}
+            items={menuItems}
+            style={{ background: 'transparent', borderInlineEnd: 'none', flex: '1 1 auto', overflowY: 'auto' }}
+          />
+          <div
+            style={{
+              flex: 'none',
+              padding: '10px 20px 14px',
+              borderTop: '0.5px solid var(--aq-border)',
+            }}
+          >
+            <Link
+              to="/admin"
+              className="dim"
+              style={{
+                fontSize: 12,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+              }}
+            >
+              <SettingOutlined />
+              后台与实盘
+            </Link>
+          </div>
         </div>
-        <Menu
-          theme={dark ? 'dark' : 'light'}
-          mode="inline"
-          selectedKeys={selected ? [selected] : []}
-          items={menuItems}
-          style={{ background: 'transparent', borderInlineEnd: 'none' }}
-        />
       </Sider>
 
       <Layout>

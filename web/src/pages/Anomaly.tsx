@@ -8,11 +8,16 @@ import type { Anomaly } from '@/types'
 import { BOARD_LABEL, SEVERITY_LABEL, fmtAmount, fmtPct, pctColor } from '@/utils/format'
 
 /**
- * 全市场价格异动。
+ * 全市场**统计偏离扫描**。
  *
  * 旧实现只扫 `get_stock_list()[:30]`（按代码序前 30 只），却把它叫做"异动预警"。
  * 现在覆盖全部活跃股（默认 5548 只），且 z 值在行情快照构建时一并算好，
  * 不额外读盘 —— 页面打开即出结果。
+ *
+ * 措辞从「预警」改成「扫描」是有意的：**预警暗示"该动手了"，而本页没有任何
+ * 被验证过的择时含义**（60 日收益偏离的 z 值，本项目从未检验过它有无预测力）。
+ * 它属于「工具箱」，不属于「证据」，更不属于「结论」——
+ * 因此标题旁挂的是「工具 · 非研究结论」，而不是任何带结论色彩的徽章。
  */
 export default function AnomalyPage() {
   const [minZ, setMinZ] = useState(2.5)
@@ -54,28 +59,38 @@ export default function AnomalyPage() {
       align: 'right',
       defaultSortOrder: 'descend',
       sorter: (a, b) => Math.abs(a.z_score) - Math.abs(b.z_score),
-      render: (v: number) => (
-        <span className="mono" style={{ color: Math.abs(v) >= 4 ? '#f5222d' : '#faad14' }}>
-          {v > 0 ? '+' : ''}
-          {v.toFixed(2)}
-        </span>
-      ),
+      render: (v: number) => {
+        // 用明度表达强度，**不用红黄** —— 红绿在本项目是涨跌专用。
+        // 一列红色的"严重"标签挨着红色的 +3.2%，读者分不清哪个红是什么意思。
+        const a = Math.abs(v)
+        return (
+          <span
+            className="mono"
+            style={{
+              color: a >= 4 ? 'var(--aq-cred-strong)' : a >= 3 ? 'var(--aq-text-2)' : 'var(--aq-text-3)',
+            }}
+          >
+            {v > 0 ? '+' : ''}
+            {v.toFixed(2)}
+          </span>
+        )
+      },
     },
     {
       title: '级别',
       dataIndex: 'severity',
-      width: 80,
+      width: 86,
       filters: [
         { text: '严重', value: 'severe' },
         { text: '警告', value: 'warn' },
         { text: '提示', value: 'info' },
       ],
       onFilter: (v, r) => r.severity === v,
-      render: (v: string) => (
-        <Tag color={v === 'severe' ? 'red' : v === 'warn' ? 'orange' : 'default'}>
-          {SEVERITY_LABEL[v] ?? v}
-        </Tag>
-      ),
+      render: (v: string) => {
+        // 级别也是「状态」，走全站同一套填充词汇（实心 / 半填充 / 空心），不占色相。
+        const cls = v === 'severe' ? 'sev-3' : v === 'warn' ? 'sev-2' : 'sev-1'
+        return <span className={`chip ${cls}`}>{SEVERITY_LABEL[v] ?? v}</span>
+      },
     },
     {
       title: '现价',
@@ -165,7 +180,20 @@ export default function AnomalyPage() {
         />
       )}
 
-      <Card size="small" title="异动预警">
+      <Card
+        size="small"
+        title={
+          <Space size={8}>
+            异动扫描
+            <Tooltip title="本页是工具，不是研究成果：z 值只描述「今天的收益偏离过去 60 日多远」，本项目从未检验过它有没有预测力。它不出现在结论台账里。">
+              <span className="chip chip-none" style={{ cursor: 'help' }}>
+                <i />
+                工具 · 非研究结论
+              </span>
+            </Tooltip>
+          </Space>
+        }
+      >
         <Table
           rowKey={(r) => `${r.symbol}-${r.time}-${r.z_score}`}
           size="small"

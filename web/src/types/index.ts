@@ -370,3 +370,53 @@ export interface ProjectStatus {
   data_assets: DataAssets
   repo: { commit?: string; date?: string; subject?: string; branch?: string }
 }
+
+/** 一条探针 = 一次「可复现的证据」。登记信息来自 scripts/probes/README.md，
+ *  文件状态由后端实时扫盘 —— 两者是分开的来源，所以能互相校对。 */
+export interface ProbeEntry {
+  script: string
+  /** 这个脚本回答什么问题（README 手写） */
+  question: string
+  /** 依赖哪些本地数据（README 手写） */
+  deps: string
+  /** README 里「支撑的文档结论」原文 */
+  doc_ref: string
+  /** 解析出的文档相对路径；解析不出为空串（不猜） */
+  doc_path: string
+  /** 章节号，如 "1.1" */
+  doc_section: string
+  /** 文档是否真的存在；null = 该条本来就没写文档 */
+  doc_exists: boolean | null
+  /** README 用 ⭐ 标了「重点 / 必跑」 */
+  starred: boolean
+  exists: boolean
+  size_bytes: number
+  mtime: string
+  n_lines: number
+  /** 模块 docstring 首行（脚本自己写的"在测什么"） */
+  docstring: string
+}
+
+export interface ProbeRegistry {
+  available: boolean
+  /** available=false 时的原因（缺文件 / 表格解析失败） */
+  reason?: string
+  source?: string
+  readme_mtime?: string
+  n_registered?: number
+  n_on_disk?: number
+  n_resolved_doc?: number
+  /** 清单里有、磁盘上找不到 —— 文档在引用不存在的证据 */
+  missing?: string[]
+  /** 磁盘上有、清单里没登记 —— 有证据但读者看不到 */
+  unregistered?: string[]
+  /** 引用了解析不到的文档路径 */
+  broken_doc?: string[]
+  latest_script_mtime?: string
+  entries: ProbeEntry[]
+  conventions?: string[]
+  prereq?: string
+  pitfalls?: string[]
+  caveat?: string
+}
+

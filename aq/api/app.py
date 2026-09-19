@@ -17,6 +17,7 @@
     GET  /api/account
     POST /api/backtest  /  GET /api/backtest/{run_id}
     GET  /api/project/status         研究进展 / 数据资产 / 已封存结论
+    GET  /api/probes                 探针台账（结论 ↔ 探针脚本 ↔ 文档，含台账漂移）
 
 「数据真实性」三条硬规则（改动本文件时请遵守）
 ------------------------------------------------
@@ -710,6 +711,23 @@ def project_status_api() -> dict:
         return project_status()
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(500, f"装配项目状态失败：{type(exc).__name__} {exc}") from exc
+
+
+# ---------------------------------------------------------------- 探针台账
+@app.get("/api/probes")
+def probes_api() -> dict:
+    """可复现证据台账：每条结论由哪个探针产生、怎么跑、出自哪份文档。
+
+    登记信息读 ``scripts/probes/README.md``（人工维护），
+    文件的存在性 / 行数 / mtime 实时扫盘，并把两者的偏差报出来 ——
+    台账是不是过期，只有交叉校对才看得出来。
+    """
+    from aq.api.probes import probe_registry
+
+    try:
+        return probe_registry()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"装配探针台账失败：{type(exc).__name__} {exc}") from exc
 
 
 # ---------------------------------------------------------------- 静态前端

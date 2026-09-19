@@ -26,9 +26,7 @@ import { Link } from 'react-router-dom'
 import api from '@/services/api'
 import type { DistBucket, IndexQuote, Quote } from '@/types'
 import { BOARD_LABEL, fmtAmount, fmtCount, fmtPct, pctColor } from '@/utils/format'
-
-const AXIS = { color: '#999', fontSize: 10 }
-const SPLIT = { lineStyle: { color: '#2a2a2a' } }
+import { useChartColors, withAlpha } from '@/theme/tokens'
 
 /** 分布柱 -> 查询区间（后端要小数，左闭右开） */
 function bucketToRange(b: DistBucket | null) {
@@ -41,6 +39,11 @@ function bucketToRange(b: DistBucket | null) {
 
 export default function MarketOverview() {
   const qc = useQueryClient()
+  // ECharts 读不到 CSS 变量 —— 轴文字 / 分割线 / tooltip 全部按主题取一份 hex。
+  // 旧实现把这三样硬编码成深色版：浅色主题下图例文字 #ccc 落在白底上几乎读不出来。
+  const cc = useChartColors()
+  const AXIS = { color: cc.textSecondary, fontSize: 10 }
+  const SPLIT = { lineStyle: { color: cc.split } }
   const [selIdx, setSelIdx] = useState<string>('')
   const [bucket, setBucket] = useState<DistBucket | null>(null)
   const [kw, setKw] = useState('')
@@ -85,16 +88,16 @@ export default function MarketOverview() {
         animation: false,
         tooltip: {
           trigger: 'axis',
-          backgroundColor: 'rgba(30,30,30,0.95)',
-          borderColor: '#444',
-          textStyle: { color: '#e8e8e8' },
+          backgroundColor: cc.tooltipBg,
+          borderColor: cc.tooltipBorder,
+          textStyle: { color: cc.text },
         },
         grid: { left: 60, right: 20, top: 16, bottom: 28 },
         xAxis: {
           type: 'category',
           data: idx.spark_dates ?? [],
           axisLabel: { ...AXIS, interval: Math.floor((idx.spark_dates?.length ?? 60) / 6) },
-          axisLine: { lineStyle: { color: '#555' } },
+          axisLine: { lineStyle: { color: cc.split } },
         },
         yAxis: { type: 'value', scale: true, splitLine: SPLIT, axisLabel: AXIS },
         series: [
@@ -104,10 +107,9 @@ export default function MarketOverview() {
             data: idx.closes,
             showSymbol: false,
             smooth: true,
-            lineStyle: { color: (idx.pct_chg ?? 0) >= 0 ? '#f5222d' : '#52c41a', width: 2 },
+            lineStyle: { color: (idx.pct_chg ?? 0) >= 0 ? cc.up : cc.down, width: 2 },
             areaStyle: {
-              color:
-                (idx.pct_chg ?? 0) >= 0 ? 'rgba(245,34,45,0.10)' : 'rgba(82,196,26,0.10)',
+              color: withAlpha((idx.pct_chg ?? 0) >= 0 ? cc.up : cc.down, 0.1),
             },
           },
         ],
@@ -116,17 +118,17 @@ export default function MarketOverview() {
 
   // ---------------- 涨跌家数 -----------------
   const donut = {
-    tooltip: { trigger: 'item', backgroundColor: 'rgba(30,30,30,0.95)', textStyle: { color: '#eee' } },
+    tooltip: { trigger: 'item', backgroundColor: cc.tooltipBg, textStyle: { color: cc.text } },
     series: [
       {
         type: 'pie',
         radius: ['48%', '72%'],
         avoidLabelOverlap: true,
-        label: { color: '#ddd', fontSize: 11, formatter: '{b}\n{c}' },
+        label: { color: cc.textSecondary, fontSize: 11, formatter: '{b}\n{c}' },
         data: [
-          { value: b.up, name: '上涨', itemStyle: { color: '#f5222d' } },
-          { value: b.down, name: '下跌', itemStyle: { color: '#52c41a' } },
-          { value: b.flat, name: '平盘', itemStyle: { color: '#8c8c8c' } },
+          { value: b.up, name: '上涨', itemStyle: { color: cc.up } },
+          { value: b.down, name: '下跌', itemStyle: { color: cc.down } },
+          { value: b.flat, name: '平盘', itemStyle: { color: cc.flat } },
         ],
       },
     ],
@@ -138,8 +140,9 @@ export default function MarketOverview() {
     tooltip: {
       trigger: 'axis',
       axisPointer: { type: 'shadow' },
-      backgroundColor: 'rgba(30,30,30,0.95)',
-      textStyle: { color: '#eee' },
+      backgroundColor: cc.tooltipBg,
+      borderColor: cc.tooltipBorder,
+      textStyle: { color: cc.text },
       formatter: (ps: { name: string; value: number }[]) =>
         `${ps[0].name}<br/>${ps[0].value} 只（点击下钻）`,
     },
@@ -148,7 +151,7 @@ export default function MarketOverview() {
       type: 'category',
       data: data.distribution.map((d) => d.label),
       axisLabel: { ...AXIS, rotate: 40, fontSize: 9 },
-      axisLine: { lineStyle: { color: '#555' } },
+      axisLine: { lineStyle: { color: cc.split } },
     },
     yAxis: { type: 'value', splitLine: SPLIT, axisLabel: AXIS },
     series: [
@@ -157,11 +160,11 @@ export default function MarketOverview() {
         data: data.distribution.map((d) => ({
           value: d.count,
           itemStyle: {
-            color:
-              d.label.startsWith('-') || d.label.startsWith('<')
-                ? 'rgba(82,196,26,0.85)'
-                : 'rgba(245,34,45,0.85)',
-            borderColor: bucket?.label === d.label ? '#fff' : 'transparent',
+            color: withAlpha(
+              d.label.startsWith('-') || d.label.startsWith('<') ? cc.down : cc.up,
+              0.85,
+            ),
+            borderColor: bucket?.label === d.label ? cc.text : 'transparent',
             borderWidth: bucket?.label === d.label ? 2 : 0,
           },
         })),
@@ -265,7 +268,10 @@ export default function MarketOverview() {
       align: 'right',
       render: (v: number) => (
         <Tooltip title="当日收益相对自身前 60 日分布的偏离（σ）">
-          <span className="mono" style={{ color: Math.abs(v) >= 3 ? '#f5222d' : '#8c8c8c' }}>
+          <span
+            className="mono"
+            style={{ color: Math.abs(v) >= 3 ? 'var(--aq-cred-strong)' : 'var(--aq-text-3)' }}
+          >
             {v.toFixed(2)}
           </span>
         </Tooltip>
@@ -384,7 +390,7 @@ export default function MarketOverview() {
                   </div>
                 )}
                 {i.available && (
-                  <div className="mono" style={{ fontSize: 12, color: '#8c8c8c' }}>
+                  <div className="mono dim" style={{ fontSize: 12 }}>
                     {i.close?.toFixed(2)}
                   </div>
                 )}
@@ -421,7 +427,7 @@ export default function MarketOverview() {
             size="small"
             title="涨跌家数"
             extra={
-              <span style={{ fontSize: 12, color: '#8c8c8c' }}>
+              <span className="dim" style={{ fontSize: 12 }}>
                 中位 {fmtPct(b.median_pct)}
               </span>
             }
@@ -433,24 +439,24 @@ export default function MarketOverview() {
               <Col span={10}>
                 <div style={{ paddingTop: 16, fontSize: 12, lineHeight: 2 }}>
                   <div>
-                    <span style={{ color: '#f5222d' }}>● 上涨</span>{' '}
+                    <span style={{ color: 'var(--aq-up)' }}>● 上涨</span>{' '}
                     <span className="mono">{b.up}</span>{' '}
                     <Typography.Text type="secondary">
                       ({((b.up / totalBreadth) * 100).toFixed(1)}%)
                     </Typography.Text>
                   </div>
                   <div>
-                    <span style={{ color: '#52c41a' }}>● 下跌</span>{' '}
+                    <span style={{ color: 'var(--aq-down)' }}>● 下跌</span>{' '}
                     <span className="mono">{b.down}</span>{' '}
                     <Typography.Text type="secondary">
                       ({((b.down / totalBreadth) * 100).toFixed(1)}%)
                     </Typography.Text>
                   </div>
                   <div>
-                    <span style={{ color: '#8c8c8c' }}>● 平盘</span>{' '}
+                    <span style={{ color: 'var(--aq-flat)' }}>● 平盘</span>{' '}
                     <span className="mono">{b.flat}</span>
                   </div>
-                  <div style={{ marginTop: 8, color: '#8c8c8c', fontSize: 11 }}>
+                  <div className="dim" style={{ marginTop: 8, fontSize: 11 }}>
                     近似涨/跌停 <span className="mono">{b.limit_up_approx}</span> /{' '}
                     <span className="mono">{b.limit_down_approx}</span>
                   </div>
@@ -609,7 +615,7 @@ export default function MarketOverview() {
         />
       </Card>
 
-      <div style={{ marginTop: 10, fontSize: 12, color: '#8c8c8c', lineHeight: 1.8 }}>
+      <div className="dim" style={{ marginTop: 10, fontSize: 12, lineHeight: 1.8 }}>
         <div>
           口径：现价 = 后复权价 ÷ 复权因子；涨跌幅 = close ÷ pre_close − 1（除权日不失真）。
           涨跌家数只统计最新交易日**有成交**的 {u.n_active} 只（停牌 {u.n_suspended} 只单列）。

@@ -28,6 +28,11 @@ python scripts/cscv_test.py --universe liquid --variant full_neu_v2 \
 
 # ETF 系列探针需要 ETF 数据（约 1 分钟 / 18 只 core）
 python scripts/fetch_etf.py --group core --nav --actions
+
+# 阶段 A 第 2 项 / 阶段 B / 阶段 C 的探针还需要这三份（合计约 20 分钟）
+python scripts/fetch_etf.py --all --nav --actions   # 全量 ETF 日线 + 净值（1674 只，约 18 分钟）
+python scripts/fetch_dividend_yield.py              # 股息率快照（2005–2025，约 1 分钟）
+python scripts/fetch_delisted.py                    # 退市股日线；走 baostock，注意 IP 风控，需串行
 ```
 
 `probe_survivorship.py` 与 `probe_style_exposure.py` 是本目录里最重的两个
@@ -65,6 +70,10 @@ python scripts/fetch_etf.py --group core --nav --actions
 | `probe_limit_field_bias.py` | ⭐ `bars/` 的涨跌停价可信吗？（**物理约束定罪** + 错配分类 + baostock `isST` 基准裁决） | `data_cache/bars`+`st_flags` | 退市股数据层 §9 |
 | `probe_limit_fill_impact.py` | 涨跌停错配**改变了多少"封板成交判定"**？（错误放行日实测） | 同上 + `data_cache/delisted_bars` | 退市股数据层 §9 |
 | `probe_st_from_limit.py` | 能不能用涨跌停价反推逐日 ST？ | 同上 | 退市股数据层 §9（**结论：不能，循环论证**） |
+| `probe_dividend_etf_baseline.py` | 红利 / 红利+低波 ETF 相对**沪深300 ETF 等权**的基线有多强？（零假设的下限） | `data_cache/etf_nav`+`etf_list` | ETF 数据层 §12 |
+| `probe_divyield_decile.py` | 股息率十分位组合（**含退市股**）到底是 alpha 还是只是降波动？ | `data_cache/dividend_yield`+`bars`+`delisted_bars` | 股息率数据层 §2 |
+| `probe_divyield_factor_alpha.py` | ⭐ 把多空收益对红利/沪深300/中证1000 三只 ETF 做回归：**阶段 B 可不可以被免费复制？** | 同上 + `data_cache/etf_nav` | 股息率数据层 §3 |
+| `probe_etf_rotation.py` | ⭐ 预注册口径下 ETF 动量轮动**跑不跑得赢同池等权**？（含扣成本前 t 与横截面 IC 诊断） | `data_cache/etf_bars`+`etf_nav` | 阶段C-ETF轮动预注册 §9 |
 
 ## 四个通用陷阱（都在这堆脚本里踩过，所以写下来）
 

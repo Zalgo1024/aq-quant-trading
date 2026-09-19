@@ -93,7 +93,9 @@ export default function StatusBar() {
         </Tooltip>
       )}
 
-      {/* ---- 右侧：主题 / 后台 / 版本 ---- */}
+      {/* ---- 右侧：主题 / 版本 ----
+          「后台」原本也在这里。已下沉到侧栏最底部：状态条只回答
+          「走到哪一步 / 数据多新 / 有没有故障」，运营入口混进来会稀释这三个问题。 */}
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 12 }}>
         <Segmented
           size="small"
@@ -104,9 +106,6 @@ export default function StatusBar() {
             { label: '深色', value: 'dark' },
           ]}
         />
-        <Link to="/admin" style={dim}>
-          后台
-        </Link>
         <Typography.Text style={{ ...dim, fontSize: 11 }}>
           v{health?.version ?? '-'}
         </Typography.Text>

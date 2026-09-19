@@ -45,8 +45,8 @@ export default function Admin() {
   ]
 
   const num = (v: number | null | undefined, digits = 4) =>
-    v == null || Number.isNaN(v) ? <span style={{ color: '#555' }}>—</span> : (
-      <span className="mono" style={{ color: v >= 0 ? '#f5222d' : '#52c41a' }}>{v.toFixed(digits)}</span>
+    v == null || Number.isNaN(v) ? <span className="dim">—</span> : (
+      <span className="mono" style={{ color: v >= 0 ? 'var(--aq-up)' : 'var(--aq-down)' }}>{v.toFixed(digits)}</span>
     )
 
   const factorCols: ColumnsType<any> = [
@@ -89,8 +89,8 @@ export default function Admin() {
       width: 80,
       align: 'right',
       render: (v: number | null) =>
-        v == null ? <span style={{ color: '#555' }}>—</span> : (
-          <span className="mono" style={{ color: v < 0.05 ? '#f5222d' : '#8c8c8c' }}>
+        v == null ? <span className="dim">—</span> : (
+          <span className="mono" style={{ color: v < 0.05 ? 'var(--aq-cred-strong)' : 'var(--aq-text-3)' }}>
             {v < 1e-4 ? '<0.0001' : v.toFixed(4)}
           </span>
         ),
@@ -101,8 +101,8 @@ export default function Admin() {
       width: 100,
       align: 'right',
       render: (v: number | null) =>
-        v == null ? <span style={{ color: '#555' }}>—</span> : (
-          <span className="mono" style={{ color: v >= 0 ? '#f5222d' : '#52c41a' }}>
+        v == null ? <span className="dim">—</span> : (
+          <span className="mono" style={{ color: v >= 0 ? 'var(--aq-up)' : 'var(--aq-down)' }}>
             {(v * 100).toFixed(1)}%
           </span>
         ),
@@ -120,7 +120,7 @@ export default function Admin() {
       width: 80,
       align: 'right',
       render: (v: number | null) =>
-        v == null ? <span style={{ color: '#555' }}>—</span> : (
+        v == null ? <span className="dim">—</span> : (
           <span className="mono">{(v * 100).toFixed(1)}%</span>
         ),
     },
@@ -183,7 +183,7 @@ export default function Admin() {
                     value={account.unrealized_pnl}
                     precision={2}
                     prefix="¥"
-                    valueStyle={{ color: account.unrealized_pnl >= 0 ? '#f5222d' : '#52c41a' }}
+                    valueStyle={{ color: account.unrealized_pnl >= 0 ? 'var(--aq-up)' : 'var(--aq-down)' }}
                   />
                 </Col>
               </Row>
@@ -193,7 +193,7 @@ export default function Admin() {
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
                 description={
-                  <span style={{ fontSize: 12, color: '#8c8c8c', lineHeight: 1.8 }}>
+                  <span className="dim" style={{ fontSize: 12, lineHeight: 1.8 }}>
                     模拟账户尚未投入资金（当前阶段 0 尚未开始小额实盘，
                     因此现金/持仓均为空）。账户写入 runtime/sim_account.json。
                   </span>
@@ -220,7 +220,7 @@ export default function Admin() {
         size="small"
         style={{ marginTop: 16 }}
         extra={
-          <span style={{ fontSize: 12, color: '#8c8c8c' }}>
+          <span className="dim" style={{ fontSize: 12 }}>
             {(factors as any)?.generated_at
               ? `样本 ${(factors as any)?.meta?.start ?? ''}~${(factors as any)?.meta?.end ?? ''}｜${(factors as any)?.meta?.n_symbols ?? '-'} 只 / ${(factors as any)?.meta?.n_days ?? '-'} 天${(factors as any)?.meta?.neutralized ? '｜已中性化' : ''}｜生成于 ${(factors as any)?.generated_at}`
               : (factors as any)?.note ?? ''}
@@ -247,18 +247,7 @@ export default function Admin() {
       </Card>
 
       <Card title="当前配置" size="small" style={{ marginTop: 16 }}>
-        <pre
-          className="mono"
-          style={{
-            background: '#1a1a1a',
-            padding: 12,
-            borderRadius: 6,
-            fontSize: 12,
-            maxHeight: 320,
-            overflow: 'auto',
-            color: '#bbb',
-          }}
-        >
+        <pre className="mono codeblock" style={{ maxHeight: 320 }}>
           {JSON.stringify(cfg, null, 2)}
         </pre>
       </Card>

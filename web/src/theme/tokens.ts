@@ -59,6 +59,10 @@ export interface ChartColors {
   warn: string
   /** 图表所在卡片的底色（tooltip / 空心柱需要） */
   surface: string
+  /** tooltip 底色。旧实现三处图表都硬编码 rgba(30,30,30,0.95)，
+   *  浅色主题下就是"白页面上飘一块黑板"，且里面的 #ccc 图例在白底上几乎读不出来。 */
+  tooltipBg: string
+  tooltipBorder: string
 }
 
 const CHART: Record<ThemeMode, ChartColors> = {
@@ -72,6 +76,8 @@ const CHART: Record<ThemeMode, ChartColors> = {
     primary: '#1668dc',
     warn: '#d48806',
     surface: '#ffffff',
+    tooltipBg: 'rgba(255,255,255,0.96)',
+    tooltipBorder: 'rgba(0,0,0,0.15)',
   },
   dark: {
     up: UP.dark,
@@ -83,11 +89,20 @@ const CHART: Record<ThemeMode, ChartColors> = {
     primary: '#1668dc',
     warn: '#faad14',
     surface: '#1f1f1f',
+    tooltipBg: 'rgba(30,30,30,0.95)',
+    tooltipBorder: '#444444',
   },
 }
 
 export function chartColors(mode: ThemeMode): ChartColors {
   return CHART[mode]
+}
+
+/** 给 hex 加透明度（ECharts 的 areaStyle 需要 rgba，不能直接用 8 位 hex）。 */
+export function withAlpha(hex: string, a: number): string {
+  const h = hex.replace("#", "");
+  const n = parseInt(h.length === 3 ? h.split("").map((c) => c + c).join("") : h, 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
 }
 
 /** 图表配色的 hook 版本（随主题切换自动重渲染）。 */

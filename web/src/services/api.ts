@@ -10,6 +10,7 @@ import type {
   IndexQuote,
   MarketOverview,
   Prediction,
+  ProbeRegistry,
   ProjectStatus,
   QuotesResponse,
   SignalsResponse,
@@ -84,6 +85,9 @@ export const api = {
 
   // ---- 项目状态 ----
   projectStatus: () => http.get<ProjectStatus>('/project/status').then((r) => r.data),
+
+  /** 探针台账：结论 ↔ 探针脚本 ↔ 文档（登记信息读 README，文件状态实时扫盘） */
+  probes: () => http.get<ProbeRegistry>('/probes').then((r) => r.data),
 
   runBacktest: (payload: {
     start?: string

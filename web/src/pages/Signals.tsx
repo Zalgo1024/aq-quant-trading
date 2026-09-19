@@ -1,9 +1,10 @@
 import { useQuery } from '@tanstack/react-query'
-import { Alert, Card, Col, Row, Segmented, Space, Statistic, Table, Tag, Tooltip, Typography } from 'antd'
+import { Card, Col, Row, Segmented, Space, Statistic, Table, Tag, Tooltip, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { Link } from 'react-router-dom'
 import { useState } from 'react'
 import api from '@/services/api'
+import NotActionable from '@/components/NotActionable'
 import type { Signal } from '@/types'
 import { DIRECTION_LABEL, fmtPct } from '@/utils/format'
 
@@ -42,7 +43,12 @@ export default function Signals() {
       dataIndex: 'side',
       width: 84,
       render: (v: string) => (
-        <Tag color={v === 'BUY' ? 'red' : 'green'}>{DIRECTION_LABEL[v] ?? v}</Tag>
+        // 用中性的「偏多 / 偏空」而不是「买入 / 卖出」：本页顶部横幅刚说过这些分数
+        // **不可据此交易**，表格却标红写着"买入"，等于自己打自己。
+        // 涨跌红绿是价格专用，分数不是价格，借来用会让读者把它读成指令。
+        <span className={v === 'BUY' ? 'dim2' : 'dim'} style={{ fontSize: 12 }}>
+          {v === 'BUY' ? '偏多' : v === 'SELL' ? '偏空' : '中性'}
+        </span>
       ),
     },
     {
@@ -52,16 +58,20 @@ export default function Signals() {
       align: 'right',
       sorter: (a, b) => a.strength - b.strength,
       defaultSortOrder: 'descend',
-      render: (v: number) => (
-        <Tooltip title={`横截面得分（0~1，0.5 为中性）${v.toFixed(6)}`}>
-          <span
-            className="mono"
-            style={{ color: v >= 0.55 ? '#f5222d' : v <= 0.45 ? '#52c41a' : '#8c8c8c' }}
-          >
-            {v.toFixed(4)}
-          </span>
-        </Tooltip>
-      ),
+      render: (v: number) => {
+        // 偏离中性的**幅度**用明度表达，不用色相（同「异动扫描」的 z 值列）。
+        const dev = Math.abs(v - 0.5)
+        return (
+          <Tooltip title={`横截面得分（0~1，0.5 为中性）${v.toFixed(6)}`}>
+            <span
+              className="mono"
+              style={{ color: dev >= 0.05 ? 'var(--aq-cred-strong)' : dev >= 0.02 ? 'var(--aq-text-2)' : 'var(--aq-text-3)' }}
+            >
+              {v.toFixed(4)}
+            </span>
+          </Tooltip>
+        )
+      },
     },
     {
       title: '置信度',
@@ -79,16 +89,9 @@ export default function Signals() {
 
   return (
     <div>
-      {/* 局限声明放最上面。这条不是客套话：模型确实被证伪了。 */}
-      {data?.caveat && (
-        <Alert
-          type="warning"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message="重要：本页分数尚未被证明有预测力（研究结论：已证伪）"
-          description={data.caveat}
-        />
-      )}
+      {/* 局限声明放最上面。这条不是客套话：模型确实被证伪了。
+          判定与证据由组件从结论台账接口取 —— 免得这里和台账各说一套。 */}
+      <NotActionable claim="多因子模型提供了独立于风格的 alpha" extra={data?.caveat} />
 
       <Card size="small" style={{ marginBottom: 12 }} styles={{ body: { padding: '10px 16px' } }}>
         <Space size={28} wrap>
@@ -128,7 +131,7 @@ export default function Signals() {
               title="打分偏多（≥0.55）"
               value={data?.buy_count ?? 0}
               suffix="只"
-              valueStyle={{ color: '#f5222d', fontFamily: 'monospace' }}
+              valueStyle={{ fontFamily: 'monospace' }}
             />
           </Card>
         </Col>
@@ -148,7 +151,7 @@ export default function Signals() {
               title="打分偏空（≤0.45）"
               value={data?.sell_count ?? 0}
               suffix="只"
-              valueStyle={{ color: '#52c41a', fontFamily: 'monospace' }}
+              valueStyle={{ fontFamily: 'monospace' }}
             />
           </Card>
         </Col>

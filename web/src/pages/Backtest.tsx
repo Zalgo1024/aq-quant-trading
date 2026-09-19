@@ -1,16 +1,20 @@
 import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { Card, Form, InputNumber, DatePicker, Button, Row, Col, Statistic, Table, message, Spin, Empty, Space, Alert, Tag } from 'antd'
+import { Card, Form, InputNumber, DatePicker, Button, Row, Col, Statistic, Table, message, Spin, Empty, Space, Tag } from 'antd'
 import ReactECharts from 'echarts-for-react'
 import dayjs from 'dayjs'
 import api from '@/services/api'
+import NotActionable from '@/components/NotActionable'
 import type { BacktestResponse } from '@/types'
 import { fmtPct, fmtMoney } from '@/utils/format'
 import { UP_COLOR, DOWN_COLOR } from '@/utils/format'
+import { useChartColors, withAlpha } from '@/theme/tokens'
 
 export default function Backtest() {
   const [form] = Form.useForm()
   const [result, setResult] = useState<BacktestResponse | null>(null)
+  // ECharts 读不到 CSS 变量，配色必须单独按主题取一份（见 theme/tokens.ts）
+  const cc = useChartColors()
 
   const mut = useMutation({
     mutationFn: api.runBacktest,
@@ -42,11 +46,11 @@ export default function Backtest() {
         animation: false,
         tooltip: {
           trigger: 'axis',
-          backgroundColor: 'rgba(30,30,30,0.95)',
-          borderColor: '#444',
-          textStyle: { color: '#e8e8e8' },
+          backgroundColor: cc.tooltipBg,
+          borderColor: cc.tooltipBorder,
+          textStyle: { color: cc.text },
         },
-        legend: { data: ['策略净值', '回撤'], textStyle: { color: '#ccc' }, top: 0 },
+        legend: { data: ['策略净值', '回撤'], textStyle: { color: cc.textSecondary }, top: 0 },
         grid: [
           { left: 70, right: 30, top: 36, height: '52%' },
           { left: 70, right: 30, top: '72%', height: '18%' },
@@ -55,29 +59,29 @@ export default function Backtest() {
           {
             type: 'category',
             data: result.equity.map((p) => p.time.slice(0, 10)),
-            axisLabel: { color: '#999', fontSize: 10 },
-            axisLine: { lineStyle: { color: '#555' } },
+            axisLabel: { color: cc.textSecondary, fontSize: 10 },
+            axisLine: { lineStyle: { color: cc.split } },
           },
           {
             type: 'category',
             gridIndex: 1,
             data: result.drawdown.map((p) => p.time.slice(0, 10)),
             axisLabel: { show: false },
-            axisLine: { lineStyle: { color: '#555' } },
+            axisLine: { lineStyle: { color: cc.split } },
           },
         ],
         yAxis: [
           {
             type: 'value',
             scale: true,
-            splitLine: { lineStyle: { color: '#2a2a2a' } },
-            axisLabel: { color: '#999', fontSize: 10, formatter: (v: number) => `${(v / 1e4).toFixed(0)}万` },
+            splitLine: { lineStyle: { color: cc.split } },
+            axisLabel: { color: cc.textSecondary, fontSize: 10, formatter: (v: number) => `${(v / 1e4).toFixed(0)}万` },
           },
           {
             gridIndex: 1,
             type: 'value',
-            axisLabel: { color: '#999', fontSize: 10, formatter: (v: number) => `${(v * 100).toFixed(0)}%` },
-            splitLine: { lineStyle: { color: '#2a2a2a' } },
+            axisLabel: { color: cc.textSecondary, fontSize: 10, formatter: (v: number) => `${(v * 100).toFixed(0)}%` },
+            splitLine: { lineStyle: { color: cc.split } },
           },
         ],
         series: [
@@ -86,8 +90,8 @@ export default function Backtest() {
             type: 'line',
             showSymbol: false,
             data: result.equity.map((p) => p.equity),
-            lineStyle: { color: '#f5222d', width: 2 },
-            areaStyle: { color: 'rgba(245,34,45,0.08)' },
+            lineStyle: { color: cc.up, width: 2 },
+            areaStyle: { color: withAlpha(cc.up, 0.08) },
           },
           {
             name: '回撤',
@@ -96,8 +100,8 @@ export default function Backtest() {
             yAxisIndex: 1,
             showSymbol: false,
             data: result.drawdown.map((p) => p.equity),
-            lineStyle: { color: '#52c41a', width: 1.5 },
-            areaStyle: { color: 'rgba(82,196,26,0.18)' },
+            lineStyle: { color: cc.down, width: 1.5 },
+            areaStyle: { color: withAlpha(cc.down, 0.18) },
           },
         ],
       }
@@ -105,16 +109,13 @@ export default function Backtest() {
 
   return (
     <div>
-      <Alert
-        type="warning"
-        showIcon
-        style={{ marginBottom: 12 }}
-        message="回测很慢，且本页结果不构成任何依据"
-        description={
-          <span style={{ fontSize: 12, lineHeight: 1.8 }}>
-            全池 5000+ 只建一次因子面板需数分钟，请求超时上限 180 秒；想快速看引擎行为请把
-            「股票池上限」设成 300~500（截断按代码序，**有系统性偏置，不能用于下结论**）。
-            本项目多因子路线在研究中已被证伪，此处只用于验证回测引擎本身是否按预期执行。
+      <NotActionable
+        claim="多因子模型提供了独立于风格的 alpha"
+        extra={
+          <span>
+            回测本身也很慢：全池 5000+ 只建一次因子面板需数分钟，请求超时上限 180 秒；
+            想快速看引擎行为请把「股票池上限」设成 300~500（截断按代码序，有系统性偏置，
+            不能用于下结论）。本页只用于验证回测引擎本身是否按预期执行。
           </span>
         }
       />
@@ -229,19 +230,7 @@ export default function Backtest() {
                 )}
               </div>
               {result.diagnostics && Object.keys(result.diagnostics).length > 0 ? (
-                <pre
-                  className="mono"
-                  style={{
-                    background: '#1a1a1a',
-                    padding: 10,
-                    borderRadius: 6,
-                    fontSize: 12,
-                    color: '#bbb',
-                    margin: 0,
-                    maxHeight: 220,
-                    overflow: 'auto',
-                  }}
-                >
+                <pre className="mono codeblock" style={{ maxHeight: 220 }}>
                   {JSON.stringify(result.diagnostics, null, 2)}
                 </pre>
               ) : (

@@ -15,6 +15,7 @@ import StockDetailPage from '@/pages/StockDetail'
 import SignalsPage from '@/pages/Signals'
 import BacktestPage from '@/pages/Backtest'
 import AnomalyPage from '@/pages/Anomaly'
+import LabPage from '@/pages/Lab'
 import AdminPage from '@/pages/Admin'
 import { antdConfig } from '@/theme/tokens'
 import { useTheme } from '@/theme/store'
@@ -46,6 +47,7 @@ function Root() {
               <Route path="signals" element={<SignalsPage />} />
               <Route path="backtest" element={<BacktestPage />} />
               <Route path="anomaly" element={<AnomalyPage />} />
+              <Route path="lab" element={<LabPage />} />
               <Route path="admin" element={<AdminPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>
