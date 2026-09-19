@@ -13,6 +13,7 @@
 import { Button, Layout, Menu, Tooltip } from 'antd'
 import {
   AlertOutlined,
+  AppstoreOutlined,
   BarChartOutlined,
   BookOutlined,
   DatabaseOutlined,
@@ -45,6 +46,10 @@ const NAV = [
     items: [
       { key: '/status', label: '数据资产', icon: <DatabaseOutlined /> },
       { key: '/market', label: '市场与池', icon: <DashboardOutlined /> },
+      // 盘后看板紧挨「市场与池」：两者是**同一份全池快照**的两种读法
+      // （那边负责分析与下钻，这边负责一屏扫完）。它借了盯盘软件的密度，
+      // 但页头硬标「日频截面 · 非实时」—— 密度可以借，"数据在动"的暗示不能借。
+      { key: '/board', label: '盘后看板', icon: <AppstoreOutlined /> },
       { key: '/stocks', label: '全市场行情', icon: <UnorderedListOutlined /> },
     ],
   },

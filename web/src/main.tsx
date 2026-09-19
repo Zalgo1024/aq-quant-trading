@@ -10,6 +10,7 @@ import HomePage from '@/pages/Home'
 import VerdictsPage from '@/pages/Verdicts'
 import ProjectStatusPage from '@/pages/ProjectStatus'
 import MarketOverviewPage from '@/pages/MarketOverview'
+import BoardPage from '@/pages/Board'
 import StockListPage from '@/pages/StockList'
 import StockDetailPage from '@/pages/StockDetail'
 import SignalsPage from '@/pages/Signals'
@@ -43,6 +44,8 @@ function Root() {
               <Route path="verdicts" element={<VerdictsPage />} />
               <Route path="status" element={<ProjectStatusPage />} />
               <Route path="market" element={<MarketOverviewPage />} />
+              {/* 盘后看板：与 /market 同一份快照，只是密度更高的另一种读法 */}
+              <Route path="board" element={<BoardPage />} />
               <Route path="stocks" element={<StockListPage />} />
               <Route path="stock/:code" element={<StockDetailPage />} />
               <Route path="signals" element={<SignalsPage />} />

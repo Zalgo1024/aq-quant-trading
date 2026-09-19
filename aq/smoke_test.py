@@ -328,6 +328,18 @@ def t_api() -> None:
     assert ov["breadth"]["up"] + ov["breadth"]["down"] > 0, (
         "全市场快照为空（涨跌家数都是 0）—— 页面会显示假数据，属于硬规则 ③ 的违反")
 
+    # /board 的行业热力图按 quotes[].industry 聚合。该字段若整体为空，
+    # 图会退化成一整块「未标注行业」——**不报错、不缺数**，只是悄悄变成废图
+    # （与 etf_list.name 错位同族：静默失败）。故在这里守住"行业真的分得开"。
+    r = client.get("/api/quotes", params={"sort": "amount", "order": "desc", "limit": 500})
+    assert r.status_code == 200, r.text
+    qb = r.json()
+    inds = {(x.get("industry") or "").strip() for x in qb.get("items", [])}
+    inds.discard("")
+    assert len(inds) >= 10, (
+        f"成交额前 500 只只聚合出 {len(inds)} 个行业 —— /board 热力图会变成一整块"
+        f"「未标注行业」。多半是 stock_list.parquet 缺 industry 列或整列为空")
+
     r = client.get("/api/signals")
     assert r.status_code == 200
     signals = r.json()

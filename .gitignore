@@ -16,6 +16,9 @@ venv/
 web/node_modules/
 web/dist/
 web/.vite/
+# tsc 的增量构建缓存：每次 build 都会改写，且是机器本地状态（曾被误提交过一次）。
+# 留着它只会让每次前端构建都在 diff 里多出一条与源码无关的改动。
+web/tsconfig.tsbuildinfo
 # Vite 每次启动会在配置旁生成带时间戳的临时文件（vite.config.ts.timestamp-*.mjs），
 # 属构建副产物，不是源码 —— 否则每次跑一次前端就多一个待提交文件。
 web/*.timestamp-*.mjs

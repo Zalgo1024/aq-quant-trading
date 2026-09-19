@@ -223,6 +223,80 @@ body {
   border-top: 0.5px solid var(--aq-border);
 }
 
+/* ------------------------------------------------------------------
+   盘后看板（/board）：借盯盘软件的密度，但只读收盘截面
+   ------------------------------------------------------------------
+   刻意**不复用 .chip**：.chip 的填充强度是「可信度 / 状态」词汇，
+   这里要标的是**口径**（日频截面 / asof / 非实时），两者混用会让
+   "半填充的徽章"同时表示两种意思。故单开 .board-tag。 */
+.board-tag {
+  display: inline-flex;
+  align-items: center;
+  font-family: 'SF Mono', Consolas, 'Courier New', monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--aq-text-2);
+  border: 0.5px solid var(--aq-border);
+  border-radius: 4px;
+  padding: 0 6px;
+  white-space: nowrap;
+}
+
+/* 「非实时」是本页最重要的一句话，给它警示色（琥珀，非涨跌语义） */
+.board-tag.warn {
+  color: var(--aq-warn);
+  border-color: var(--aq-warn);
+}
+
+/* 榜单 / 指数条的高密度行：一屏要能放下 15 行，行高必须压到 26px */
+.board-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  height: 26px;
+  padding: 0 12px;
+  font-size: 12px;
+  color: var(--aq-text);
+  text-decoration: none;
+}
+
+.board-row:hover {
+  background: var(--aq-surface-2);
+}
+
+.board-rank {
+  flex: none;
+  width: 18px;
+  font-size: 11px;
+}
+
+.board-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-code {
+  flex: none;
+  width: 52px;
+  font-size: 11px;
+}
+
+.board-val {
+  flex: none;
+  width: 64px;
+  text-align: right;
+}
+
+.board-val2 {
+  flex: none;
+  width: 56px;
+  text-align: right;
+  font-size: 11px;
+}
+
 /* 滚动条 */
 ::-webkit-scrollbar {
   width: 8px;
