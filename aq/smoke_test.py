@@ -579,6 +579,128 @@ def t_probe_registry() -> None:
           f"｜负对照已捕获")
 
 
+def t_archive_caliber() -> None:
+    """研究产物归档：口径判定必须抓得住「不可引用」，且与 README 人工表零漂移。
+
+    这一项为什么存在：归档页要回答「我以前跑出来的数字还能不能引用」。
+    判定可能的两个错向，**危险的是把不可引用判成可引用** ——
+    读者会去引用一个口径已失效的数字（本项目的 t 口径 bug 就是这么传出去的）。
+    所以负对照准备的不是一个坏输入，而是**五类**：
+    缺字段（旧 raw）、字段只在一半配置里（口径不一致）、没有 configs（判定不了）、
+    json 读不出来、以及权重基准目录已消失（不可复现）。五类都必须落到"不可引用"。
+
+    只有一类输入该被判可引用（口径齐备 + 权重基准还在），用来验"它没把什么都判死"——
+    一个永远返回 False 的判定器和永远返回 True 的一样没用。
+    """
+    import json as _json
+    import tempfile
+    from pathlib import Path
+
+    from aq.api import archive as A
+
+    with tempfile.TemporaryDirectory() as td:
+        rt = Path(td)
+        (rt / "cscv").mkdir()
+        (rt / "factor_research").mkdir()
+
+        def wcfg(name: str, configs: list, **extra) -> None:
+            doc = {
+                "universe": "liquid",
+                "period": {"start": "2019-01-01", "end": "2026-08-31"},
+                "configs": configs,
+                "verdict": {"pbo": 0.2, "t_stat": 0.9, "dsr": 0.3, "significant": False},
+                "pbo_main": {"pbo": 0.2, "haircut": 0.5},
+                "dsr_main": {"deflated_sharpe": 0.3},
+            }
+            doc.update(extra)
+            (rt / "cscv" / name).write_text(_json.dumps(doc), encoding="utf-8")
+
+        GOOD = {"label": "a", "score_neutralize": True}
+        CAL = "raw_minus_benchmark_no_rf"
+
+        wcfg("cscv_old_raw.json", [{"label": "a"}, {"label": "b"}])
+        wcfg("cscv_fixed.json", [GOOD], excess_caliber=CAL)
+        wcfg("cscv_partial.json", [GOOD, {"label": "b"}], excess_caliber=CAL)
+        wcfg("cscv_no_configs.json", [], excess_caliber=CAL)
+        (rt / "cscv" / "cscv_broken.json").write_text("{ not json", encoding="utf-8")
+        wcfg(
+            "cscv_orphan_basis.json",
+            [GOOD],
+            excess_caliber=CAL,
+            weight_basis="runtime/factor_research/does_not_exist",
+        )
+
+        for name, meta in (
+            ("neu_run", {"neutralized": True, "universe": "liquid", "n_factors": 31}),
+            ("raw_run", {"neutralized": False, "universe": "liquid", "n_factors": 27}),
+        ):
+            d0 = rt / "factor_research" / name
+            d0.mkdir()
+            (d0 / "meta.json").write_text(_json.dumps(meta), encoding="utf-8")
+        (rt / "factor_research" / "no_meta_run").mkdir()
+
+        d = A.archive_index(root=rt)
+        assert d["available"], "临时目录里明明有产物，available 不该是 False"
+        got = {e["name"]: e for e in d["cscv"]}
+
+        # 五类坏输入 → 一律不可引用，且必须给出原因
+        bad_ones = (
+            "cscv_old_raw",
+            "cscv_partial",
+            "cscv_no_configs",
+            "cscv_broken",
+            "cscv_orphan_basis",
+        )
+        for name in bad_ones:
+            assert got[name]["quotable"] is False, f"{name} 应判不可引用，却判成可引用"
+            assert got[name]["blockers"], f"{name} 判了不可引用却没给原因（读者无法行动）"
+        # 唯一的好输入必须活着 —— 否则判定器就是"一律判死"
+        assert got["cscv_fixed"]["quotable"] is True, "口径齐备的产物被判成不可引用"
+        assert not got["cscv_fixed"]["blockers"]
+
+        # 中间态要各自报出来，不能一律归成 raw
+        assert got["cscv_old_raw"]["caliber"]["neutralize"] == "missing"
+        assert got["cscv_partial"]["caliber"]["neutralize"] == "partial"
+        assert got["cscv_no_configs"]["caliber"]["neutralize"] == "unknown", (
+            "没有 configs 时应如实说「判定不了」，而不是默认通过")
+        assert got["cscv_broken"]["readable"] is False
+        # 两个独立口径维度要分开报：缺 excess_caliber 与缺 score_neutralize 是两回事
+        assert any("excess_caliber" in b for b in got["cscv_old_raw"]["blockers"])
+        assert any("权重基准" in b for b in got["cscv_orphan_basis"]["blockers"])
+        # DSR 必须真读到值（键名是 deflated_sharpe；取错键会静默变成 None）
+        assert got["cscv_fixed"]["dsr_main"] is not None, "DSR 读成 None —— 多半是键名取错了"
+
+        runs = {e["name"]: e for e in d["factor_runs"]}
+        assert runs["neu_run"]["caliber"]["state"] == "neutralized"
+        assert runs["raw_run"]["caliber"]["state"] == "raw"
+        assert runs["no_meta_run"]["caliber"]["state"] == "unknown", "缺 meta 不能默认通过"
+
+        # available 的语义：空目录 / 不存在的目录都要 False + 原因，不许返回空列表冒充正常
+        empty = Path(td) / "empty_rt"
+        empty.mkdir()
+        d2 = A.archive_index(root=empty)
+        assert d2["available"] is False and d2["unavailable_reason"].strip(), (
+            "空 runtime 目录应 available=False 并说明原因")
+        d3 = A.archive_index(root=Path(td) / "nope")
+        assert d3["available"] is False and d3["unavailable_reason"].strip(), (
+            "不存在的 runtime 目录应 available=False 并说明原因")
+
+    # --- 真仓库：机械判定必须与 README 那张人工表逐行一致 ---
+    real = A.archive_index()
+    table = A.readme_quotable_table()
+    assert table, "README「历史结果口径清点」表解析出 0 行 —— 表结构变了或解析退化"
+    mism = [x for x in real["readme_drift"] if x["kind"] == "verdict_mismatch"]
+    assert not mism, f"归档口径判定与 README 人工表不一致：{mism}"
+    gone = [x for x in real["readme_drift"] if x["kind"] == "missing_on_disk"]
+    assert not gone, f"README 表里列了、磁盘上却没有的产物：{gone}"
+
+    print(
+        f"        → 归档 {real['summary']['n_cscv']} 个 CSCV + {real['summary']['n_factor_runs']} 轮因子研究"
+        f"｜可引用 {real['summary']['n_quotable']}｜README 表 {len(table)} 行·判定零漂移"
+        f"｜负对照 5 类坏输入全部判为不可引用"
+    )
+
+
 # ==========================================================================
 # main
 # ==========================================================================
@@ -600,6 +722,7 @@ def main() -> int:
     check("9. 防过拟合统计标定（PBO 零假设≈0.5 / DSR / N_eff）", t_cscv)
     check("10. Walk-forward 定权的前视偏差（公式/因果/节奏三层）", t_wf_lookahead)
     check("11. 探针台账一致性与漂移检测（含负对照）", t_probe_registry)
+    check("12. 研究产物归档的口径判定（含 5 类负对照 + README 表零漂移）", t_archive_caliber)
 
     print("-" * 70)
     passed = sum(1 for _, ok, _ in _results if ok)

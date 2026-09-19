@@ -420,3 +420,120 @@ export interface ProbeRegistry {
   caveat?: string
 }
 
+/** 一个 CSCV 产物的打分口径判定（/api/archive）。
+ *  规则写在 README 第 5 节，后端只做机械执行 —— 前端也**不要**在这里重算规则。 */
+export interface ArchiveCaliber {
+  /** present = 全配置都带 score_neutralize；missing = 全缺（raw 旧口径）；
+   *  partial = 一次运行里混了口径；unknown = 没有 configs，判定不了 */
+  neutralize: 'present' | 'missing' | 'partial' | 'unknown'
+  neutralize_value?: boolean | null
+  n_with_field?: number
+  n_configs?: number
+  /** 有值说明是「双扣 rf」修正之后的超额口径 */
+  excess_caliber?: string
+  quotable?: boolean
+  blockers?: string[]
+}
+
+/** 一枚 CSCV 产物（runtime/cscv/*.json）。字段在坏产物分支会缺，故几乎全可选。 */
+export interface ArchiveCscv {
+  name: string
+  path: string
+  mtime: string
+  bytes: number
+  readable: boolean
+  parse_error?: string
+  generated_at?: string
+  universe?: string
+  universe_note?: string
+  benchmark?: string
+  period?: { start: string; end: string }
+  weight_basis?: string
+  weight_basis_exists?: boolean
+  /** 是否有 *_returns.csv（能用 --only-stats 低成本复核的前提） */
+  has_returns?: boolean
+  returns_path?: string
+  /** 旁边那个同名目录里的逐配置收益缓存文件数（>0 表示可低成本重算） */
+  n_rets_cache?: number
+  pbo_main?: number | null
+  pbo_excess?: number | null
+  best_t?: number | null
+  dsr_main?: number | null
+  dsr_excess?: number | null
+  haircut?: number | null
+  verdict_significant?: boolean | null
+  verdict_note?: string[]
+  caliber: ArchiveCaliber
+  quotable: boolean
+  blockers: string[]
+}
+
+/** 一轮因子研究产物（runtime/factor_research/<run>/）。 */
+export interface ArchiveFactorRun {
+  name: string
+  path: string
+  mtime: string
+  has_meta: boolean
+  has_report: boolean
+  has_summary: boolean
+  n_files: number
+  extra_files: string[]
+  generated_at?: string
+  universe?: string
+  start?: string
+  end?: string
+  n_factors?: number | null
+  n_rows?: number | null
+  n_symbols?: number | null
+  n_days?: number | null
+  n_significant?: number | null
+  n_strong?: number | null
+  caliber: { state: 'neutralized' | 'raw' | 'unknown'; note: string }
+}
+
+/** README 人工表与本模块计算不一致的一处（kind: verdict_mismatch / missing_on_disk） */
+export interface ArchiveDrift {
+  kind: string
+  name: string
+  readme: boolean | null
+  computed: boolean | null
+  blockers: string[]
+}
+
+/** 只剩收益缓存、结果 json 已丢的目录 */
+export interface ArchiveCacheOnly {
+  name: string
+  path: string
+  mtime: string
+  n_files: number
+}
+
+/** /api/archive —— 研究产物归档总表。
+ *  数据全来自 runtime/（gitignore）⇒ 干净克隆下 available=false 属正常。 */
+export interface ArchiveIndex {
+  available: boolean
+  unavailable_reason: string
+  root: string
+  generated_at: string
+  readme_available: boolean
+  readme_n_rows: number
+  readme_drift: ArchiveDrift[]
+  readme_unlisted: string[]
+  cache_only_dirs: ArchiveCacheOnly[]
+  summary: {
+    n_cscv: number
+    n_quotable: number
+    n_stale: number
+    n_factor_runs: number
+    n_unlisted: number
+    n_cache_only: number
+    n_missing_weight_basis: number
+    n_without_returns: number
+    latest_mtime: string
+  }
+  cscv: ArchiveCscv[]
+  factor_runs: ArchiveFactorRun[]
+  rules: string[]
+  caveat: string
+}
+

@@ -78,7 +78,7 @@ python scripts/fetch_meta.py                     # 元数据：日历/上市日�
 python scripts/check_data_quality.py             # 数据质检
 
 # 6) 切到真实数据源（config/base.yaml: data.source = local）
-python aq/smoke_test.py                          # 应 11/11 通过
+python aq/smoke_test.py                          # 应 12/12 通过
 
 # 之后每天增量更新（建议 19:00 后）
 python scripts/update_daily.py --overlap 10
@@ -135,11 +135,14 @@ python scripts/factor_research.py --neutralize          # 行业+市值中性化
 |---|---|---|
 | 研究主线 | `/` 研究进展 · `/verdicts` 结论台账 | 走到哪一步；每条结论的判定与证据 |
 | 证据 | `/status` 数据资产 · `/market` 市场与池 · `/stocks` 全市场行情 | 数字从哪来、口径是什么、缺什么 |
-| 实验 | `/lab` 实验室 · `/signals` 因子打分 · `/anomaly` 异动扫描 · `/backtest` 回测研究 | 动手的地方 |
+| 实验 | `/lab` 实验室 · `/archive` 研究归档 · `/signals` 因子打分 · `/backtest` 回测研究 · `/anomaly` 异动扫描 | 动手的地方 |
+| 运维 | `/admin`（侧栏底部一个图标，Tooltip 说明） | 后台与实盘，**不属于研究流程** |
 
-> 实验室排在实验区第一位，是有意的：动手之前先看「已经做过什么、**怎么被做死的**」，
-> 比直接看当日打分榜有用得多。运维入口（`/admin`）不属于研究流程，
-> 但也不能藏起来 → 沉在侧栏最底部。
+> 实验组内部**研究产物在前、工具在末位**，是有意的：动手之前先看「已经做过什么、
+> **怎么被做死的**」，比直接看当日打分榜有用得多。`/anomaly` 是一个统计工具
+> （z 值只描述"今天的收益偏离过去 60 日多远"，本项目从未检验过它有无预测力），
+> 所以它排末位，页内还自带「工具 · 非研究结论」标注。
+> 运维入口藏的是**视觉权重，不是可发现性** —— 图标保留 Tooltip 与 `aria-label`。
 
 ### 三条前端设计硬规则
 
@@ -163,13 +166,36 @@ python scripts/factor_research.py --neutralize          # 行业+市值中性化
 > （`probe_dividend_etf_baseline` / `probe_divyield_decile` / `probe_divyield_factor_alpha` / `probe_etf_rotation`）。
 > 现在 **31 个探针 / 31 行登记，漂移 0**。加探针**必须同时登记进 README**，否则页面直接报漂移。
 
+### 研究归档（`/archive` + `GET /api/archive`）
+
+实验室管「结论是哪个脚本跑出来的」（代码证据），归档管
+**「哪一次运行的结果现在还引用得起」**（运行产物）。两者的腐烂方式一样：
+不报错、不缺数据，只是悄悄变成假话。
+
+`aq/api/archive.py` 的执行规则**全部来自第 5 节那张表**，本模块一行规则都不自己发明：
+
+| 判据 | 结论 |
+|---|---|
+| `configs[].score_neutralize` **不存在** | raw 旧口径 ⇒ 不可引用（"没有该字段"本身即结论） |
+| 没有 `excess_caliber` | 超额类数字是"双扣 rf"修正之前的 ⇒ 不可引用 |
+| `weight_basis` 指向的目录不在磁盘上 | 数字还能读，但**这次运行无法原样复现** ⇒ 不可引用 |
+| 字段**部分**存在（n/m 个配置） | 一次运行里混了口径 ⇒ 不可引用（比全缺更可疑） |
+| 没有 `configs` | **判定不了就报"判定不了"，不默认通过** |
+
+除了逐产物判定，它还报四类结构性问题：与第 5 节表**逐行不一致**（`readme_drift`）、
+**磁盘有而表未列**（`readme_unlisted`）、**只剩收益缓存而结果 json 已丢**（`cache_only_dirs`）、
+以及**能否低成本复核**（有 `*_returns.csv` 或旁边 `rets/` 缓存 ⇒ `--only-stats` 可重算）。
+
+> ⚠️ 数据全部在 `runtime/` 下，而 `runtime/` 被 gitignore ⇒ **干净克隆打开这一页必然为空**。
+> 这是正确行为：它返回 `available:false` + 原因，**绝不返回空列表冒充"没跑过任何实验"**。
+
 ### 主题与验证
 
 浅色 / 深色可切换。**主题色有三处必须同时对齐**：CSS 变量（`web/src/styles/global.css`）、
 antd `ConfigProvider` token、**ECharts 的 hex 颜色**——ECharts 读不到 CSS 变量，
 所以图表统一走 `useChartColors()` / `withAlpha()`，任何地方硬编码 hex 都会在切换主题时露馅。
 
-自检：`python -m aq.smoke_test` **11/11 通过**（它是自包含的，前端页面的契约也在其中）。
+自检：`python -m aq.smoke_test` **12/12 通过**（它是自包含的，前端页面的契约也在其中）。
 另有一个走真实 HTTP 的端到端脚本（32 项，含**独立重扫磁盘**核对探针数量、
 不复用被测代码的结论），它在本地 `runtime/` 下、**未入库**（`runtime/` 被 gitignore）。
 
@@ -358,8 +384,8 @@ CSCV v2（31 因子 / liquid / 2019 起）——**raw 口径 vs 中性化口径*
 3. **预测的新风险被证实**：`risk.industry_max = 0.30` 现在是**硬约束**
    （行业拒单 27 → 380 笔），下一阶段必须处理。
 
-> `python -m aq.smoke_test` **11/11 通过**（原有 8 项 + PBO 标定 + walk-forward 前视三层检查
-> + 探针台账漂移检测），说明改动没有破坏任何既有链路。
+> `python -m aq.smoke_test` **12/12 通过**（原有 8 项 + PBO 标定 + walk-forward 前视三层检查
+> + 探针台账漂移检测 + 归档口径判定与 README 表交叉核对），说明改动没有破坏任何既有链路。
 
 #### 4.2 超额口径把无风险利率扣了两次
 
@@ -406,6 +432,7 @@ E = R - B        # R 此时已是「策略 − rf」，B 是【原始】基准�
 | `cscv_liquid_wf` | ⚠️ raw（旧） | full_neu（27） | 2021 起 | ❌ **待重跑**（唯一的 walk-forward 定权 CSCV） |
 | `cscv_liquid_main` | ⚠️ raw（旧） | full_neu_sh（27） | 2021 起 | ❌ 待重跑 |
 | `cscv_hs300_main` | ⚠️ raw（旧） | full_neu（27） | 2021 起 | ❌ 低优先（hs300 含幸存者偏差，仅作对照） |
+| `cscv_hs300_smoke` | ⚠️ raw（旧） | full_neu（27） | 2025-06 起 | ❌ smoke 冒烟跑（2 配置、1.25 年），只用于验证管道，不作结论 |
 | `cscv_liquid_val_only` | ⚠️ raw（旧） | full_neu_v2 | 2019 起 | ❌ 已被下面两条取代 |
 | `cscv_liquid_neu_main` | ✅ 中性化 | full_neu_v2 | 2019 起 | ✅ 可引用（第 1 节的 raw 表请一并对照） |
 | `cscv_liquid_neu_val` | ✅ 中性化 | full_neu_v2（仅 bp/ep/sp） | 2019 起 | ✅ 可引用（第 2 节） |
@@ -418,10 +445,33 @@ E = R - B        # R 此时已是「策略 − rf」，B 是【原始】基准�
 **还有第二个独立的口径维度**：`pbo_excess` / `dsr_excess`（只有加 `--excess` 才生成）。
 2026-09-17 之前生成的这部分数字全部受 4.2 的"双扣 rf"影响 → **同样不可引用**。
 已重算（带 `excess_caliber` 标记）：`neu_main`、`neu_val`、`raw_val`、`cost1`。
-**仍未重算**：`liquid_main`、`hs300_main`、`hs300_smoke`（后两者无 rets 缓存、无法用
-`--only-stats` 重算，且本身已标 ❌）。判别方法同上一段：json 里**没有** `excess_caliber`
-字段 = 修正前。**故意不去改写它们**——那是遗留产物，重写有"静默改动"的风险，
+**仍未重算**：`liquid_main`、`hs300_main`、`hs300_smoke`。判别方法同上一段：json 里**没有**
+`excess_caliber` 字段 = 修正前。**故意不去改写它们**——那是遗留产物，重写有"静默改动"的风险，
 标注清楚比改对它更重要。
+
+> ⚠️ **2026-09-19 复核订正一处描述**：本节原先写"`hs300_main` / `hs300_smoke`（后两者无 rets 缓存、
+> 无法用 `--only-stats` 重算）"。新做的归档页（`/archive` + `GET /api/archive`，见「本地工作台」）
+> 扫盘后发现：**这两份产物各自都有逐配置收益缓存**（`runtime/cscv/hs300_main/rets/` 18 个文件、
+> `hs300_smoke/rets/` 6 个，都是 `<label>.csv` / `.bench.csv` / `.meta.json`）——
+> 也就是说"无 rets 缓存"与磁盘现状不符，**能不能重算这一点没有被实测过**。
+> 本轮**没有去实测**（`--only-stats` 会就地改写遗留 json，与本段"故意不改写遗留产物"的政策冲突），
+> 因此只订正描述、**判定仍保持 ❌**：既没有重算，就不该改变可引用状态。
+> 备份留在 `runtime/_backup_*_before_excess.json`。
+
+### 这张表已经有自动化版本：`/archive`
+
+上面那张表是**人工维护**的，而人工表会腐烂（腐烂时既不报错也不缺数据）。
+现在有 `GET /api/archive`（前端 `/archive` 归档页）按本节写死的两条规则**机械重算一遍**，
+并把结果与这张表**逐行比对**，不一致就报漂移：
+
+```bash
+# 判定规则就是本节那两条，代码在 aq/api/archive.py
+python -m aq.smoke_test     # 第 12 项：5 类坏输入必须判为「不可引用」+ 与本表零漂移
+```
+
+> 📌 2026-09-19 现状：**10 个 CSCV 产物 → 可引用 4 个**，机械判定与上表**零漂移**。
+> 这张表少列了 `cscv_hs300_smoke`（磁盘上有、表里没有），已补上 ——
+> "产物存在但没人写下它的口径状态"与"引用了不存在的产物"同样致命。
 
 > 📌 **为什么要把这张表写进 README**：口径修复是"静默"的——它不会让任何旧数字报错，
 > 只会让它们**变得不可信**。不把失效范围写清楚，下一个人（包括几个月后的自己）
@@ -628,8 +678,8 @@ aq_project/
 │  ├─ portfolio/    # 组合构建 + 风控引擎
 │  ├─ execution/    # MarketFeed / TradingGateway 抽象 + SimGateway + 实盘 Adapter 壳
 │  ├─ backtest/     # 回测引擎（复用 SimGateway 撮合）+ CSCV/PBO/DSR 防过拟合
-│  ├─ api/          # FastAPI 服务（行情快照 / 项目状态 / 探针台账）
-│  └─ smoke_test.py # 自包含端到端冒烟测试（11 项）
+│  ├─ api/          # FastAPI 服务（行情快照 / 项目状态 / 探针台账 / 研究产物归档）
+│  └─ smoke_test.py # 自包含端到端冒烟测试（12 项）
 ├─ config/          # base.yaml / paper.yaml / backtest.yaml / live.example.yaml / etf.yaml
 ├─ scripts/         # 数据拉取/质检/修复、因子研究、CSCV、分组诊断、ETF 管道
 │  └─ probes/       # 研究探针（只读）：支撑文档结论的可复现脚本，见其 README

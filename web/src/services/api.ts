@@ -2,6 +2,7 @@ import axios from 'axios'
 import type {
   AccountInfo,
   AnomalyResponse,
+  ArchiveIndex,
   BacktestResponse,
   FactorCorr,
   FactorIcSeries,
@@ -88,6 +89,9 @@ export const api = {
 
   /** 探针台账：结论 ↔ 探针脚本 ↔ 文档（登记信息读 README，文件状态实时扫盘） */
   probes: () => http.get<ProbeRegistry>('/probes').then((r) => r.data),
+
+  /** 研究产物归档：跑过什么、**哪些数字还能引用**（口径判定 + README 表交叉核对） */
+  archive: () => http.get<ArchiveIndex>('/archive').then((r) => r.data),
 
   runBacktest: (payload: {
     start?: string

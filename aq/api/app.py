@@ -18,6 +18,7 @@
     POST /api/backtest  /  GET /api/backtest/{run_id}
     GET  /api/project/status         研究进展 / 数据资产 / 已封存结论
     GET  /api/probes                 探针台账（结论 ↔ 探针脚本 ↔ 文档，含台账漂移）
+    GET  /api/archive                研究产物归档（哪些跑过的结果还能引用，含 README 表漂移）
 
 「数据真实性」三条硬规则（改动本文件时请遵守）
 ------------------------------------------------
@@ -728,6 +729,27 @@ def probes_api() -> dict:
         return probe_registry()
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(500, f"装配探针台账失败：{type(exc).__name__} {exc}") from exc
+
+
+# ---------------------------------------------------------------- 研究产物归档
+@app.get("/api/archive")
+def archive_api() -> dict:
+    """跑过的实验产物，以及**哪些数字还能引用**。
+
+    判定规则不是在这里写的，它写在 ``README.md`` 第 5 节「历史结果口径清点」：
+    ``configs[].score_neutralize`` 字段不存在 ⇒ raw 口径（旧）；没有 ``excess_caliber``
+    ⇒ 超额类数字是「双扣 rf」修正之前的。本接口把这两条机械执行，并把结果与
+    README 那张人工表逐行比对，不一致就报 ``readme_drift``。
+
+    ⚠️ 数据来自 ``runtime/``，该目录被 gitignore ⇒ 干净克隆下必然为空，
+    此时返回 ``available=false`` 并说明原因，**不返回空列表冒充"没有产物"**。
+    """
+    from aq.api.archive import archive_index
+
+    try:
+        return archive_index()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"装配研究产物归档失败：{type(exc).__name__} {exc}") from exc
 
 
 # ---------------------------------------------------------------- 静态前端
